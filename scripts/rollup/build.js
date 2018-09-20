@@ -481,11 +481,6 @@ async function createBundle(bundle, bundleType) {
       bundle.modulesToStub,
       pureExternalModules
     ),
-    // We can't use getters in www.
-    legacy:
-      bundleType === FB_WWW_DEV ||
-      bundleType === FB_WWW_PROD ||
-      bundleType === FB_WWW_PROFILING,
   };
   const [mainOutputPath, ...otherOutputPaths] = Packaging.getBundleOutputPaths(
     bundleType,
