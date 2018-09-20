@@ -317,7 +317,7 @@ function getPlugins(
     forbidFBJSImports(),
     // Use Node resolution mechanism.
     resolve({
-      skip: externals,
+      external: externals,
     }),
     // Remove license headers from individual modules
     stripBanner({
