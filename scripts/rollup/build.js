@@ -533,7 +533,9 @@ function handleRollupWarning(warning) {
     return;
   }
 
-  if (typeof warning.code === 'string') {
+  if (typeof warning.code === 'string' &&
+    warning.code !== 'CIRCULAR_DEPENDENCY' &&
+    warning.code !== 'MISSING_EXPORT') {
     // This is a warning coming from Rollup itself.
     // These tend to be important (e.g. clashes in namespaced exports)
     // so we'll fail the build on any of them.
