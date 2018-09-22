@@ -11,6 +11,8 @@ import type {Fiber} from './ReactFiber';
 import type {Batch, FiberRoot} from './ReactFiberRoot';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
 import type {Interaction} from 'scheduler/src/Tracing';
+import type {CapturedValue} from './ReactCapturedValue';
+import type {Instance} from './ReactFiberHostConfig';
 
 import {__interactionsRef, __subscriberRef} from 'scheduler/tracing';
 import {
@@ -34,6 +36,9 @@ import {
   Ref,
   Incomplete,
   HostEffectMask,
+  Update as UpdateEffect,
+  LifecycleEffectMask,
+  ShouldCapture,
 } from 'shared/ReactSideEffectTags';
 import {
   HostRoot,
@@ -42,6 +47,11 @@ import {
   HostComponent,
   ContextProvider,
   HostPortal,
+  PlaceholderComponent,
+  IndeterminateComponent,
+  FunctionalComponent,
+  HostText,
+  Profiler,
 } from 'shared/ReactWorkTags';
 import {
   enableSchedulerTracing,
@@ -51,6 +61,7 @@ import {
   warnAboutDeprecatedLifecycles,
   warnAboutLegacyContextAPI,
   enableSuspense,
+  enableGetDerivedStateFromCatch,
 } from 'shared/ReactFeatureFlags';
 import getComponentName from 'shared/getComponentName';
 import invariant from 'shared/invariant';
@@ -61,6 +72,8 @@ import {
   scheduleTimeout,
   cancelTimeout,
   noTimeout,
+  getPublicInstance,
+  commitMount,
 } from './ReactFiberHostConfig';
 
 import ReactFiberInstrumentation from './ReactFiberInstrumentation';
@@ -100,6 +113,8 @@ import {
   stopCommitHostEffectsTimer,
   startCommitLifeCyclesTimer,
   stopCommitLifeCyclesTimer,
+  startPhaseTimer,
+  stopPhaseTimer,
 } from './ReactDebugFiberPerf';
 import {createWorkInProgress, assignFiberPropertiesInDEV} from './ReactFiber';
 import {onCommitRoot} from './ReactFiberDevToolsHook';
@@ -111,9 +126,17 @@ import {
   expirationTimeToMs,
   computeAsyncExpiration,
   computeInteractiveExpiration,
+  LOW_PRIORITY_EXPIRATION,
 } from './ReactFiberExpirationTime';
-import {AsyncMode, ProfileMode} from './ReactTypeOfMode';
-import {enqueueUpdate, resetCurrentlyProcessingQueue} from './ReactUpdateQueue';
+import {AsyncMode, ProfileMode, StrictMode} from './ReactTypeOfMode';
+import {
+  CaptureUpdate,
+  commitUpdateQueue,
+  createUpdate,
+  enqueueCapturedUpdate,
+  enqueueUpdate,
+  resetCurrentlyProcessingQueue,
+} from './ReactUpdateQueue';
 import {createCapturedValue} from './ReactCapturedValue';
 import {
   isContextProvider as isLegacyContextProvider,
@@ -123,6 +146,7 @@ import {
 import {popProvider, resetContextDependences} from './ReactFiberNewContext';
 import {popHostContext, popHostContainer} from './ReactFiberHostContext';
 import {
+  getCommitTime,
   recordCommitTime,
   startProfilerTimer,
   stopProfilerTimerIfRunningAndRecordDelta,
@@ -131,26 +155,26 @@ import {
   checkThatStackIsEmpty,
   resetStackAfterFatalErrorInDev,
 } from './ReactFiberStack';
-import {beginWork} from './ReactFiberBeginWork';
-import {completeWork} from './ReactFiberCompleteWork';
 import {
-  throwException,
+  NoopComponent,
   unwindWork,
   unwindInterruptedWork,
-  createRootErrorUpdate,
-  createClassErrorUpdate,
 } from './ReactFiberUnwindWork';
+import {beginWork, reconcileChildren} from './ReactFiberBeginWork';
+import {completeWork} from './ReactFiberCompleteWork';
 import {
   commitBeforeMutationLifeCycles,
   commitResetTextContent,
   commitPlacement,
   commitDeletion,
   commitWork,
-  commitLifeCycles,
   commitAttachRef,
   commitDetachRef,
+  logError,
+  callComponentWillUnmountWithTimer,
 } from './ReactFiberCommitWork';
 import {Dispatcher} from './ReactFiberDispatcher';
+import maxSigned31BitInt from './maxSigned31BitInt';
 
 export type Deadline = {
   timeRemaining(): number,
@@ -162,6 +186,7 @@ export type Thenable = {
 };
 
 const {ReactCurrentOwner} = ReactSharedInternals;
+const emptyObject = {};
 
 let didWarnAboutStateTransition;
 let didWarnSetStateChildContext;
@@ -469,6 +494,153 @@ function commitBeforeMutationLifecycles() {
 
   if (__DEV__) {
     ReactCurrentFiber.resetCurrentFiber();
+  }
+}
+
+function commitLifeCycles(
+  finishedRoot: FiberRoot,
+  current: Fiber | null,
+  finishedWork: Fiber,
+  committedExpirationTime: ExpirationTime,
+): void {
+  switch (finishedWork.tag) {
+    case ClassComponent:
+    case ClassComponentLazy: {
+      const instance = finishedWork.stateNode;
+      if (finishedWork.effectTag & Update) {
+        if (current === null) {
+          startPhaseTimer(finishedWork, 'componentDidMount');
+          instance.props = finishedWork.memoizedProps;
+          instance.state = finishedWork.memoizedState;
+          instance.componentDidMount();
+          stopPhaseTimer();
+        } else {
+          const prevProps = current.memoizedProps;
+          const prevState = current.memoizedState;
+          startPhaseTimer(finishedWork, 'componentDidUpdate');
+          instance.props = finishedWork.memoizedProps;
+          instance.state = finishedWork.memoizedState;
+          instance.componentDidUpdate(
+            prevProps,
+            prevState,
+            instance.__reactInternalSnapshotBeforeUpdate,
+          );
+          stopPhaseTimer();
+        }
+      }
+      const updateQueue = finishedWork.updateQueue;
+      if (updateQueue !== null) {
+        instance.props = finishedWork.memoizedProps;
+        instance.state = finishedWork.memoizedState;
+        commitUpdateQueue(
+          finishedWork,
+          updateQueue,
+          instance,
+          committedExpirationTime,
+        );
+      }
+      return;
+    }
+    case HostRoot: {
+      const updateQueue = finishedWork.updateQueue;
+      if (updateQueue !== null) {
+        let instance = null;
+        if (finishedWork.child !== null) {
+          switch (finishedWork.child.tag) {
+            case HostComponent:
+              instance = getPublicInstance(finishedWork.child.stateNode);
+              break;
+            case ClassComponent:
+            case ClassComponentLazy:
+              instance = finishedWork.child.stateNode;
+              break;
+          }
+        }
+        commitUpdateQueue(
+          finishedWork,
+          updateQueue,
+          instance,
+          committedExpirationTime,
+        );
+      }
+      return;
+    }
+    case HostComponent: {
+      const instance: Instance = finishedWork.stateNode;
+
+      // Renderers may schedule work to be done after host components are mounted
+      // (eg DOM renderer may schedule auto-focus for inputs and form controls).
+      // These effects should only be committed when components are first mounted,
+      // aka when there is no current/alternate.
+      if (current === null && finishedWork.effectTag & Update) {
+        const type = finishedWork.type;
+        const props = finishedWork.memoizedProps;
+        commitMount(instance, type, props, finishedWork);
+      }
+
+      return;
+    }
+    case HostText: {
+      // We have no life-cycles associated with text.
+      return;
+    }
+    case HostPortal: {
+      // We have no life-cycles associated with portals.
+      return;
+    }
+    case Profiler: {
+      if (enableProfilerTimer) {
+        const onRender = finishedWork.memoizedProps.onRender;
+
+        if (enableSchedulerTracing) {
+          onRender(
+            finishedWork.memoizedProps.id,
+            current === null ? 'mount' : 'update',
+            finishedWork.actualDuration,
+            finishedWork.treeBaseDuration,
+            finishedWork.actualStartTime,
+            getCommitTime(),
+            finishedRoot.memoizedInteractions,
+          );
+        } else {
+          onRender(
+            finishedWork.memoizedProps.id,
+            current === null ? 'mount' : 'update',
+            finishedWork.actualDuration,
+            finishedWork.treeBaseDuration,
+            finishedWork.actualStartTime,
+            getCommitTime(),
+          );
+        }
+      }
+      return;
+    }
+    case PlaceholderComponent: {
+      if (enableSuspense) {
+        if ((finishedWork.mode & StrictMode) === NoEffect) {
+          // In loose mode, a placeholder times out by scheduling a synchronous
+          // update in the commit phase. Use `updateQueue` field to signal that
+          // the Timeout needs to switch to the placeholder. We don't need an
+          // entire queue. Any non-null value works.
+          // $FlowFixMe - Intentionally using a value other than an UpdateQueue.
+          finishedWork.updateQueue = emptyObject;
+          scheduleWork(finishedWork, Sync);
+        } else {
+          // In strict mode, the Update effect is used to record the time at
+          // which the placeholder timed out.
+          const currentTime = requestCurrentTime();
+          finishedWork.stateNode = {timedOutAt: currentTime};
+        }
+      }
+      return;
+    }
+    default: {
+      invariant(
+        false,
+        'This unit of work tag should not have side-effects. This error is ' +
+          'likely caused by a bug in React. Please file an issue.',
+      );
+    }
   }
 }
 
@@ -1159,6 +1331,248 @@ function workLoop(isYieldy) {
   }
 }
 
+function throwException(
+  root: FiberRoot,
+  returnFiber: Fiber,
+  sourceFiber: Fiber,
+  value: mixed,
+  renderExpirationTime: ExpirationTime,
+) {
+  // The source fiber did not complete.
+  sourceFiber.effectTag |= Incomplete;
+  // Its effect list is no longer valid.
+  sourceFiber.firstEffect = sourceFiber.lastEffect = null;
+
+  if (
+    enableSuspense &&
+    value !== null &&
+    typeof value === 'object' &&
+    typeof value.then === 'function'
+  ) {
+    // This is a thenable.
+    const thenable: Thenable = (value: any);
+
+    // Find the earliest timeout threshold of all the placeholders in the
+    // ancestor path. We could avoid this traversal by storing the thresholds on
+    // the stack, but we choose not to because we only hit this path if we're
+    // IO-bound (i.e. if something suspends). Whereas the stack is used even in
+    // the non-IO- bound case.
+    let workInProgress = returnFiber;
+    let earliestTimeoutMs = -1;
+    let startTimeMs = -1;
+    do {
+      if (workInProgress.tag === PlaceholderComponent) {
+        const current = workInProgress.alternate;
+        if (
+          current !== null &&
+          current.memoizedState === true &&
+          current.stateNode !== null
+        ) {
+          // Reached a placeholder that already timed out. Each timed out
+          // placeholder acts as the root of a new suspense boundary.
+
+          // Use the time at which the placeholder timed out as the start time
+          // for the current render.
+          const timedOutAt = current.stateNode.timedOutAt;
+          startTimeMs = expirationTimeToMs(timedOutAt);
+
+          // Do not search any further.
+          break;
+        }
+        let timeoutPropMs = workInProgress.pendingProps.delayMs;
+        if (typeof timeoutPropMs === 'number') {
+          if (timeoutPropMs <= 0) {
+            earliestTimeoutMs = 0;
+          } else if (
+            earliestTimeoutMs === -1 ||
+            timeoutPropMs < earliestTimeoutMs
+          ) {
+            earliestTimeoutMs = timeoutPropMs;
+          }
+        }
+      }
+      workInProgress = workInProgress.return;
+    } while (workInProgress !== null);
+
+    // Schedule the nearest Placeholder to re-render the timed out view.
+    workInProgress = returnFiber;
+    do {
+      if (workInProgress.tag === PlaceholderComponent) {
+        const didTimeout = workInProgress.memoizedState;
+        if (!didTimeout) {
+          // Found the nearest boundary.
+
+          // If the boundary is not in async mode, we should not suspend, and
+          // likewise, when the promise resolves, we should ping synchronously.
+          const pingTime =
+            (workInProgress.mode & AsyncMode) === NoEffect
+              ? Sync
+              : renderExpirationTime;
+
+          // Attach a listener to the promise to "ping" the root and retry.
+          const onResolveOrReject = retrySuspendedRoot.bind(
+            null,
+            root,
+            workInProgress,
+            pingTime,
+          );
+          thenable.then(onResolveOrReject, onResolveOrReject);
+
+          // If the boundary is outside of strict mode, we should *not* suspend
+          // the commit. Pretend as if the suspended component rendered null and
+          // keep rendering. In the commit phase, we'll schedule a subsequent
+          // synchronous update to re-render the Placeholder.
+          //
+          // Note: It doesn't matter whether the component that suspended was
+          // inside a strict mode tree. If the Placeholder is outside of it, we
+          // should *not* suspend the commit.
+          if ((workInProgress.mode & StrictMode) === NoEffect) {
+            workInProgress.effectTag |= UpdateEffect;
+
+            // Unmount the source fiber's children
+            const nextChildren = null;
+            reconcileChildren(
+              sourceFiber.alternate,
+              sourceFiber,
+              nextChildren,
+              renderExpirationTime,
+            );
+            sourceFiber.effectTag &= ~Incomplete;
+            if (sourceFiber.tag === IndeterminateComponent) {
+              // Let's just assume it's a functional component. This fiber will
+              // be unmounted in the immediate next commit, anyway.
+              sourceFiber.tag = FunctionalComponent;
+            }
+
+            if (
+              sourceFiber.tag === ClassComponent ||
+              sourceFiber.tag === ClassComponentLazy
+            ) {
+              // We're going to commit this fiber even though it didn't
+              // complete. But we shouldn't call any lifecycle methods or
+              // callbacks. Remove all lifecycle effect tags.
+              sourceFiber.effectTag &= ~LifecycleEffectMask;
+              if (sourceFiber.alternate === null) {
+                // We're about to mount a class component that doesn't have an
+                // instance. Turn this into a dummy functional component instead,
+                // to prevent type errors. This is a bit weird but it's an edge
+                // case and we're about to synchronously delete this
+                // component, anyway.
+                sourceFiber.tag = FunctionalComponent;
+                sourceFiber.type = NoopComponent;
+              }
+            }
+
+            // Exit without suspending.
+            return;
+          }
+
+          // Confirmed that the boundary is in a strict mode tree. Continue with
+          // the normal suspend path.
+
+          let absoluteTimeoutMs;
+          if (earliestTimeoutMs === -1) {
+            // If no explicit threshold is given, default to an abitrarily large
+            // value. The actual size doesn't matter because the threshold for the
+            // whole tree will be clamped to the expiration time.
+            absoluteTimeoutMs = maxSigned31BitInt;
+          } else {
+            if (startTimeMs === -1) {
+              // This suspend happened outside of any already timed-out
+              // placeholders. We don't know exactly when the update was scheduled,
+              // but we can infer an approximate start time from the expiration
+              // time. First, find the earliest uncommitted expiration time in the
+              // tree, including work that is suspended. Then subtract the offset
+              // used to compute an async update's expiration time. This will cause
+              // high priority (interactive) work to expire earlier than necessary,
+              // but we can account for this by adjusting for the Just Noticeable
+              // Difference.
+              const earliestExpirationTime = findEarliestOutstandingPriorityLevel(
+                root,
+                renderExpirationTime,
+              );
+              const earliestExpirationTimeMs = expirationTimeToMs(
+                earliestExpirationTime,
+              );
+              startTimeMs = earliestExpirationTimeMs - LOW_PRIORITY_EXPIRATION;
+            }
+            absoluteTimeoutMs = startTimeMs + earliestTimeoutMs;
+          }
+
+          // Mark the earliest timeout in the suspended fiber's ancestor path.
+          // After completing the root, we'll take the largest of all the
+          // suspended fiber's timeouts and use it to compute a timeout for the
+          // whole tree.
+          renderDidSuspend(root, absoluteTimeoutMs, renderExpirationTime);
+
+          workInProgress.effectTag |= ShouldCapture;
+          workInProgress.expirationTime = renderExpirationTime;
+          return;
+        }
+        // This boundary already captured during this render. Continue to the
+        // next boundary.
+      }
+      workInProgress = workInProgress.return;
+    } while (workInProgress !== null);
+    // No boundary was found. Fallthrough to error mode.
+    value = new Error(
+      'An update was suspended, but no placeholder UI was provided.',
+    );
+  }
+
+  // We didn't find a boundary that could handle this type of exception. Start
+  // over and traverse parent path again, this time treating the exception
+  // as an error.
+  renderDidError();
+  value = createCapturedValue(value, sourceFiber);
+  let workInProgress = returnFiber;
+  do {
+    switch (workInProgress.tag) {
+      case HostRoot: {
+        const errorInfo = value;
+        workInProgress.effectTag |= ShouldCapture;
+        workInProgress.expirationTime = renderExpirationTime;
+        const update = createRootErrorUpdate(
+          workInProgress,
+          errorInfo,
+          renderExpirationTime,
+        );
+        enqueueCapturedUpdate(workInProgress, update);
+        return;
+      }
+      case ClassComponent:
+      case ClassComponentLazy:
+        // Capture and retry
+        const errorInfo = value;
+        const ctor = workInProgress.type;
+        const instance = workInProgress.stateNode;
+        if (
+          (workInProgress.effectTag & DidCapture) === NoEffect &&
+          ((typeof ctor.getDerivedStateFromCatch === 'function' &&
+            enableGetDerivedStateFromCatch) ||
+            (instance !== null &&
+              typeof instance.componentDidCatch === 'function' &&
+              !isAlreadyFailedLegacyErrorBoundary(instance)))
+        ) {
+          workInProgress.effectTag |= ShouldCapture;
+          workInProgress.expirationTime = renderExpirationTime;
+          // Schedule the error boundary to re-render using updated state
+          const update = createClassErrorUpdate(
+            workInProgress,
+            errorInfo,
+            renderExpirationTime,
+          );
+          enqueueCapturedUpdate(workInProgress, update);
+          return;
+        }
+        break;
+      default:
+        break;
+    }
+    workInProgress = workInProgress.return;
+  } while (workInProgress !== null);
+}
+
 function renderRoot(
   root: FiberRoot,
   isYieldy: boolean,
@@ -1441,6 +1855,68 @@ function renderRoot(
 
   // Ready to commit.
   onComplete(root, rootWorkInProgress, expirationTime);
+}
+
+function createRootErrorUpdate(
+  fiber: Fiber,
+  errorInfo: CapturedValue<mixed>,
+  expirationTime: ExpirationTime,
+): Update<mixed> {
+  const update = createUpdate(expirationTime);
+  // Unmount the root by rendering null.
+  update.tag = CaptureUpdate;
+  // Caution: React DevTools currently depends on this property
+  // being called "element".
+  update.payload = {element: null};
+  const error = errorInfo.value;
+  update.callback = () => {
+    onUncaughtError(error);
+    logError(fiber, errorInfo);
+  };
+  return update;
+}
+
+function createClassErrorUpdate(
+  fiber: Fiber,
+  errorInfo: CapturedValue<mixed>,
+  expirationTime: ExpirationTime,
+): Update<mixed> {
+  const update = createUpdate(expirationTime);
+  update.tag = CaptureUpdate;
+  const getDerivedStateFromCatch = fiber.type.getDerivedStateFromCatch;
+  if (
+    enableGetDerivedStateFromCatch &&
+    typeof getDerivedStateFromCatch === 'function'
+  ) {
+    const error = errorInfo.value;
+    update.payload = () => {
+      return getDerivedStateFromCatch(error);
+    };
+  }
+
+  const inst = fiber.stateNode;
+  if (inst !== null && typeof inst.componentDidCatch === 'function') {
+    update.callback = function callback() {
+      if (
+        !enableGetDerivedStateFromCatch ||
+        getDerivedStateFromCatch !== 'function'
+      ) {
+        // To preserve the preexisting retry behavior of error boundaries,
+        // we keep track of which ones already failed during this batch.
+        // This gets reset before we yield back to the browser.
+        // TODO: Warn in strict mode if getDerivedStateFromCatch is
+        // not defined.
+        markLegacyErrorBoundaryAsFailed(this);
+      }
+      const error = errorInfo.value;
+      const stack = errorInfo.stack;
+      logError(fiber, errorInfo);
+      this.componentDidCatch(error, {
+        componentStack: stack !== null ? stack : '',
+      });
+    };
+  }
+  return update;
 }
 
 function dispatch(
@@ -2507,6 +2983,52 @@ function flushControlled(fn: () => mixed): void {
     isBatchingUpdates = previousIsBatchingUpdates;
     if (!isBatchingUpdates && !isRendering) {
       performSyncWork();
+    }
+  }
+}
+
+// Capture errors so they don't interrupt unmounting.
+function safelyCallComponentWillUnmount(current, instance) {
+  if (__DEV__) {
+    invokeGuardedCallback(
+      null,
+      callComponentWillUnmountWithTimer,
+      null,
+      current,
+      instance,
+    );
+    if (hasCaughtError()) {
+      const unmountError = clearCaughtError();
+      captureCommitPhaseError(current, unmountError);
+    }
+  } else {
+    try {
+      callComponentWillUnmountWithTimer(current, instance);
+    } catch (unmountError) {
+      captureCommitPhaseError(current, unmountError);
+    }
+  }
+}
+
+function safelyDetachRef(current: Fiber) {
+  const ref = current.ref;
+  if (ref !== null) {
+    if (typeof ref === 'function') {
+      if (__DEV__) {
+        invokeGuardedCallback(null, ref, null, null);
+        if (hasCaughtError()) {
+          const refError = clearCaughtError();
+          captureCommitPhaseError(current, refError);
+        }
+      } else {
+        try {
+          ref(null);
+        } catch (refError) {
+          captureCommitPhaseError(current, refError);
+        }
+      }
+    } else {
+      ref.current = null;
     }
   }
 }
