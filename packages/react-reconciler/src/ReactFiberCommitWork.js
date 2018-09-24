@@ -32,7 +32,6 @@ import getComponentName from 'shared/getComponentName';
 import invariant from 'shared/invariant';
 import warningWithoutStack from 'shared/warningWithoutStack';
 
-import {onCommitUnmount} from './ReactFiberDevToolsHook';
 import {startPhaseTimer, stopPhaseTimer} from './ReactDebugFiberPerf';
 import {getStackByFiberInDevAndProd} from './ReactCurrentFiber';
 import {logCapturedError} from './ReactFiberErrorLogger';
@@ -47,8 +46,6 @@ import {
   appendChildToContainer,
   insertBefore,
   insertInContainerBefore,
-  removeChild,
-  removeChildFromContainer,
   replaceContainerChildren,
   createContainerChildSet,
 } from './ReactFiberHostConfig';
@@ -198,41 +195,6 @@ function commitDetachRef(current: Fiber) {
     } else {
       currentRef.current = null;
     }
-  }
-}
-
-function commitNestedUnmounts(root: Fiber): void {
-  // While we're inside a removed host node we don't want to call
-  // removeChild on the inner nodes because they're removed by the top
-  // call anyway. We also want to call componentWillUnmount on all
-  // composites before this host node is removed from the tree. Therefore
-  // we do an inner loop while we're still inside the host node.
-  let node: Fiber = root;
-  while (true) {
-    commitUnmount(node);
-    // Visit children because they may contain more composite or host nodes.
-    // Skip portals because commitUnmount() currently visits them recursively.
-    if (
-      node.child !== null &&
-      // If we use mutation we drill down into portals using commitUnmount above.
-      // If we don't use mutation we drill down into portals here instead.
-      (!supportsMutation || node.tag !== HostPortal)
-    ) {
-      node.child.return = node;
-      node = node.child;
-      continue;
-    }
-    if (node === root) {
-      return;
-    }
-    while (node.sibling === null) {
-      if (node.return === null || node.return === root) {
-        return;
-      }
-      node = node.return;
-    }
-    node.sibling.return = node.return;
-    node = node.sibling;
   }
 }
 
@@ -444,108 +406,6 @@ function commitPlacement(finishedWork: Fiber): void {
   }
 }
 
-function unmountHostComponents(current): void {
-  // We only have the top Fiber that was deleted but we need recurse down its
-  // children to find all the terminal nodes.
-  let node: Fiber = current;
-
-  // Each iteration, currentParent is populated with node's host parent if not
-  // currentParentIsValid.
-  let currentParentIsValid = false;
-
-  // Note: these two variables *must* always be updated together.
-  let currentParent;
-  let currentParentIsContainer;
-
-  while (true) {
-    if (!currentParentIsValid) {
-      let parent = node.return;
-      findParent: while (true) {
-        invariant(
-          parent !== null,
-          'Expected to find a host parent. This error is likely caused by ' +
-            'a bug in React. Please file an issue.',
-        );
-        switch (parent.tag) {
-          case HostComponent:
-            currentParent = parent.stateNode;
-            currentParentIsContainer = false;
-            break findParent;
-          case HostRoot:
-            currentParent = parent.stateNode.containerInfo;
-            currentParentIsContainer = true;
-            break findParent;
-          case HostPortal:
-            currentParent = parent.stateNode.containerInfo;
-            currentParentIsContainer = true;
-            break findParent;
-        }
-        parent = parent.return;
-      }
-      currentParentIsValid = true;
-    }
-
-    if (node.tag === HostComponent || node.tag === HostText) {
-      commitNestedUnmounts(node);
-      // After all the children have unmounted, it is now safe to remove the
-      // node from the tree.
-      if (currentParentIsContainer) {
-        removeChildFromContainer((currentParent: any), node.stateNode);
-      } else {
-        removeChild((currentParent: any), node.stateNode);
-      }
-      // Don't visit children because we already visited them.
-    } else if (node.tag === HostPortal) {
-      // When we go into a portal, it becomes the parent to remove from.
-      // We will reassign it back when we pop the portal on the way up.
-      currentParent = node.stateNode.containerInfo;
-      currentParentIsContainer = true;
-      // Visit children because portals might contain host components.
-      if (node.child !== null) {
-        node.child.return = node;
-        node = node.child;
-        continue;
-      }
-    } else {
-      commitUnmount(node);
-      // Visit children because we may find more host components below.
-      if (node.child !== null) {
-        node.child.return = node;
-        node = node.child;
-        continue;
-      }
-    }
-    if (node === current) {
-      return;
-    }
-    while (node.sibling === null) {
-      if (node.return === null || node.return === current) {
-        return;
-      }
-      node = node.return;
-      if (node.tag === HostPortal) {
-        // When we go out of the portal, we need to restore the parent.
-        // Since we don't keep a stack of them, we will search for it.
-        currentParentIsValid = false;
-      }
-    }
-    node.sibling.return = node.return;
-    node = node.sibling;
-  }
-}
-
-function commitDeletion(current: Fiber): void {
-  if (supportsMutation) {
-    // Recursively delete all host nodes from the parent.
-    // Detach refs and call componentWillUnmount() on the whole subtree.
-    unmountHostComponents(current);
-  } else {
-    // Detach refs and call componentWillUnmount() on the whole subtree.
-    commitNestedUnmounts(current);
-  }
-  detachFiber(current);
-}
-
 function commitWork(current: Fiber | null, finishedWork: Fiber): void {
   if (!supportsMutation) {
     commitContainer(finishedWork);
@@ -626,10 +486,11 @@ function commitResetTextContent(current: Fiber) {
 }
 
 export {
+  detachFiber,
+  emptyPortalContainer,
   commitBeforeMutationLifeCycles,
   commitResetTextContent,
   commitPlacement,
-  commitDeletion,
   commitWork,
   commitAttachRef,
   commitDetachRef,
