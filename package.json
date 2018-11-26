@@ -1,6 +1,6 @@
 {
   "private": true,
-  "version": "16.6.0-alpha.8af6728",
+  "version": "16.6.1",
   "workspaces": [
     "packages/*"
   ],
@@ -92,7 +92,7 @@
     "testRegex": "/scripts/jest/dont-run-jest-directly\\.js$"
   },
   "scripts": {
-    "build": "npm run version-check && node ./scripts/rollup/build.js",
+    "build": "node ./scripts/rollup/build.js",
     "linc": "node ./scripts/tasks/linc.js",
     "lint": "node ./scripts/tasks/eslint.js",
     "lint-build": "node ./scripts/rollup/validate/index.js",

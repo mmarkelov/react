@@ -18,10 +18,7 @@ let ReactCache;
 function initEnvForAsyncTesting() {
   // Boilerplate copied from ReactDOMRoot-test
   // TODO pull this into helper method, reduce repetition.
-  const originalDateNow = Date.now;
-  global.Date.now = function() {
-    return originalDateNow();
-  };
+  // TODO remove `requestAnimationFrame` when upgrading to Jest 24 with Lolex
   global.requestAnimationFrame = function(cb) {
     return setTimeout(() => {
       cb(Date.now());
@@ -59,7 +56,6 @@ function loadModules() {
 
 describe('ProfilerDOM', () => {
   let TextResource;
-  let cache;
   let resourcePromise;
   let onInteractionScheduledWorkCompleted;
   let onInteractionTraced;
@@ -81,11 +77,9 @@ describe('ProfilerDOM', () => {
       onWorkStopped: () => {},
     });
 
-    cache = ReactCache.createCache(() => {});
-
     resourcePromise = null;
 
-    TextResource = ReactCache.createResource(([text, ms = 0]) => {
+    TextResource = ReactCache.unstable_createResource(([text, ms = 0]) => {
       resourcePromise = new Promise(
         SchedulerTracing.unstable_wrap((resolve, reject) => {
           setTimeout(
@@ -101,7 +95,7 @@ describe('ProfilerDOM', () => {
   });
 
   const AsyncText = ({ms, text}) => {
-    TextResource.read(cache, [text, ms]);
+    TextResource.read([text, ms]);
     return text;
   };
 
@@ -119,11 +113,9 @@ describe('ProfilerDOM', () => {
       const root = ReactDOM.unstable_createRoot(element);
       batch = root.createBatch();
       batch.render(
-        <React.unstable_Suspense
-          maxDuration={100}
-          fallback={<Text text="Loading..." />}>
+        <React.Suspense maxDuration={100} fallback={<Text text="Loading..." />}>
           <AsyncText text="Text" ms={200} />
-        </React.unstable_Suspense>,
+        </React.Suspense>,
       );
       batch.then(
         SchedulerTracing.unstable_wrap(() => {
@@ -145,7 +137,7 @@ describe('ProfilerDOM', () => {
 
               // Evaluate in an unwrapped callback,
               // Because trace/wrap won't decrement the count within the wrapped callback.
-              setImmediate(() => {
+              Promise.resolve().then(() => {
                 expect(onInteractionTraced).toHaveBeenCalledTimes(1);
                 expect(
                   onInteractionScheduledWorkCompleted,

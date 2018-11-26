@@ -22,16 +22,11 @@ import {
   findCurrentHostFiber,
   findCurrentHostFiberWithNoPortals,
 } from 'react-reconciler/reflection';
-import * as ReactInstanceMap from 'shared/ReactInstanceMap';
-import {
-  HostComponent,
-  ClassComponent,
-  ClassComponentLazy,
-} from 'shared/ReactWorkTags';
+import {get as getInstance} from 'shared/ReactInstanceMap';
+import {HostComponent, ClassComponent} from 'shared/ReactWorkTags';
 import getComponentName from 'shared/getComponentName';
 import invariant from 'shared/invariant';
 import warningWithoutStack from 'shared/warningWithoutStack';
-import {getResultFromResolvedThenable} from 'shared/ReactLazyComponent';
 
 import {getPublicInstance} from './ReactFiberHostConfig';
 import {
@@ -41,7 +36,7 @@ import {
   isContextProvider as isLegacyContextProvider,
 } from './ReactFiberContext';
 import {createFiberRoot} from './ReactFiberRoot';
-import * as ReactFiberDevToolsHook from './ReactFiberDevToolsHook';
+import {injectInternals} from './ReactFiberDevToolsHook';
 import {
   computeUniqueAsyncExpiration,
   requestCurrentTime,
@@ -57,10 +52,16 @@ import {
   syncUpdates,
   interactiveUpdates,
   flushInteractiveUpdates,
+  flushPassiveEffects,
 } from './ReactFiberScheduler';
 import {createUpdate, enqueueUpdate} from './ReactUpdateQueue';
 import ReactFiberInstrumentation from './ReactFiberInstrumentation';
-import * as ReactCurrentFiber from './ReactCurrentFiber';
+import {
+  getStackByFiberInDevAndProd,
+  phase as ReactCurrentFiberPhase,
+  current as ReactCurrentFiberCurrent,
+} from './ReactCurrentFiber';
+import {StrictMode} from './ReactTypeOfMode';
 
 type OpaqueRoot = FiberRoot;
 
@@ -82,9 +83,11 @@ type DevToolsConfig = {|
 |};
 
 let didWarnAboutNestedUpdates;
+let didWarnAboutFindNodeInStrictMode;
 
 if (__DEV__) {
   didWarnAboutNestedUpdates = false;
+  didWarnAboutFindNodeInStrictMode = {};
 }
 
 function getContextForSubtree(
@@ -94,16 +97,11 @@ function getContextForSubtree(
     return emptyContextObject;
   }
 
-  const fiber = ReactInstanceMap.get(parentComponent);
+  const fiber = getInstance(parentComponent);
   const parentContext = findCurrentUnmaskedContext(fiber);
 
   if (fiber.tag === ClassComponent) {
     const Component = fiber.type;
-    if (isLegacyContextProvider(Component)) {
-      return processChildContext(fiber, Component, parentContext);
-    }
-  } else if (fiber.tag === ClassComponentLazy) {
-    const Component = getResultFromResolvedThenable(fiber.type);
     if (isLegacyContextProvider(Component)) {
       return processChildContext(fiber, Component, parentContext);
     }
@@ -120,8 +118,8 @@ function scheduleRootUpdate(
 ) {
   if (__DEV__) {
     if (
-      ReactCurrentFiber.phase === 'render' &&
-      ReactCurrentFiber.current !== null &&
+      ReactCurrentFiberPhase === 'render' &&
+      ReactCurrentFiberCurrent !== null &&
       !didWarnAboutNestedUpdates
     ) {
       didWarnAboutNestedUpdates = true;
@@ -131,7 +129,7 @@ function scheduleRootUpdate(
           'triggering nested component updates from render is not allowed. ' +
           'If necessary, trigger nested updates in componentDidUpdate.\n\n' +
           'Check the render method of %s.',
-        getComponentName(ReactCurrentFiber.current.type) || 'Unknown',
+        getComponentName(ReactCurrentFiberCurrent.type) || 'Unknown',
       );
     }
   }
@@ -151,9 +149,11 @@ function scheduleRootUpdate(
     );
     update.callback = callback;
   }
-  enqueueUpdate(current, update);
 
+  flushPassiveEffects();
+  enqueueUpdate(current, update);
   scheduleWork(current, expirationTime);
+
   return expirationTime;
 }
 
@@ -190,7 +190,7 @@ export function updateContainerAtExpirationTime(
 }
 
 function findHostInstance(component: Object): PublicInstance | null {
-  const fiber = ReactInstanceMap.get(component);
+  const fiber = getInstance(component);
   if (fiber === undefined) {
     if (typeof component.render === 'function') {
       invariant(false, 'Unable to find node on an unmounted component.');
@@ -207,6 +207,67 @@ function findHostInstance(component: Object): PublicInstance | null {
     return null;
   }
   return hostFiber.stateNode;
+}
+
+function findHostInstanceWithWarning(
+  component: Object,
+  methodName: string,
+): PublicInstance | null {
+  if (__DEV__) {
+    const fiber = getInstance(component);
+    if (fiber === undefined) {
+      if (typeof component.render === 'function') {
+        invariant(false, 'Unable to find node on an unmounted component.');
+      } else {
+        invariant(
+          false,
+          'Argument appears to not be a ReactComponent. Keys: %s',
+          Object.keys(component),
+        );
+      }
+    }
+    const hostFiber = findCurrentHostFiber(fiber);
+    if (hostFiber === null) {
+      return null;
+    }
+    if (hostFiber.mode & StrictMode) {
+      const componentName = getComponentName(fiber.type) || 'Component';
+      if (!didWarnAboutFindNodeInStrictMode[componentName]) {
+        didWarnAboutFindNodeInStrictMode[componentName] = true;
+        if (fiber.mode & StrictMode) {
+          warningWithoutStack(
+            false,
+            '%s is deprecated in StrictMode. ' +
+              '%s was passed an instance of %s which is inside StrictMode. ' +
+              'Instead, add a ref directly to the element you want to reference.' +
+              '\n%s' +
+              '\n\nLearn more about using refs safely here:' +
+              '\nhttps://fb.me/react-strict-mode-find-node',
+            methodName,
+            methodName,
+            componentName,
+            getStackByFiberInDevAndProd(hostFiber),
+          );
+        } else {
+          warningWithoutStack(
+            false,
+            '%s is deprecated in StrictMode. ' +
+              '%s was passed an instance of %s which renders StrictMode children. ' +
+              'Instead, add a ref directly to the element you want to reference.' +
+              '\n%s' +
+              '\n\nLearn more about using refs safely here:' +
+              '\nhttps://fb.me/react-strict-mode-find-node',
+            methodName,
+            methodName,
+            componentName,
+            getStackByFiberInDevAndProd(hostFiber),
+          );
+        }
+      }
+    }
+    return hostFiber.stateNode;
+  }
+  return findHostInstance(component);
 }
 
 export function createContainer(
@@ -266,6 +327,8 @@ export function getPublicRootInstance(
 
 export {findHostInstance};
 
+export {findHostInstanceWithWarning};
+
 export function findHostInstanceWithNoPortals(
   fiber: Fiber,
 ): PublicInstance | null {
@@ -278,7 +341,7 @@ export function findHostInstanceWithNoPortals(
 
 export function injectIntoDevTools(devToolsConfig: DevToolsConfig): boolean {
   const {findFiberByHostInstance} = devToolsConfig;
-  return ReactFiberDevToolsHook.injectInternals({
+  return injectInternals({
     ...devToolsConfig,
     findHostInstanceByFiber(fiber: Fiber): Instance | TextInstance | null {
       const hostFiber = findCurrentHostFiber(fiber);

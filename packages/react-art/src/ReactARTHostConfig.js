@@ -8,6 +8,7 @@
 export {
   unstable_now as now,
   unstable_scheduleCallback as scheduleDeferredCallback,
+  unstable_shouldYield as shouldYield,
   unstable_cancelCallback as cancelDeferredCallback,
 } from 'scheduler';
 import Transform from 'art/core/transform';
@@ -404,4 +405,22 @@ export function commitUpdate(
   newProps,
 ) {
   instance._applyProps(instance, newProps, oldProps);
+}
+
+export function hideInstance(instance) {
+  instance.hide();
+}
+
+export function hideTextInstance(textInstance) {
+  // Noop
+}
+
+export function unhideInstance(instance, props) {
+  if (props.visible == null || props.visible) {
+    instance.show();
+  }
+}
+
+export function unhideTextInstance(textInstance, text): void {
+  // Noop
 }

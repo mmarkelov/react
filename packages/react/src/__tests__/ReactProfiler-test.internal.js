@@ -13,11 +13,16 @@
 let React;
 let ReactFeatureFlags;
 let ReactNoop;
+let ReactCache;
 let ReactTestRenderer;
 let advanceTimeBy;
 let SchedulerTracing;
 let mockNow;
 let AdvanceTime;
+let AsyncText;
+let Text;
+let TextResource;
+let resourcePromise;
 
 function loadModules({
   enableProfilerTimer = true,
@@ -40,6 +45,7 @@ function loadModules({
 
   React = require('react');
   SchedulerTracing = require('scheduler/tracing');
+  ReactCache = require('react-cache');
 
   if (useNoopRenderer) {
     ReactNoop = require('react-noop-renderer');
@@ -67,6 +73,46 @@ function loadModules({
       advanceTimeBy(this.props.byAmount);
       return this.props.children || null;
     }
+  };
+
+  resourcePromise = null;
+
+  function yieldForRenderer(value) {
+    if (ReactNoop) {
+      ReactNoop.yield(value);
+    } else {
+      ReactTestRenderer.unstable_yield(value);
+    }
+  }
+
+  TextResource = ReactCache.unstable_createResource(([text, ms = 0]) => {
+    resourcePromise = new Promise((resolve, reject) =>
+      setTimeout(() => {
+        yieldForRenderer(`Promise resolved [${text}]`);
+        resolve(text);
+      }, ms),
+    );
+    return resourcePromise;
+  }, ([text, ms]) => text);
+
+  AsyncText = ({ms, text}) => {
+    try {
+      TextResource.read([text, ms]);
+      yieldForRenderer(`AsyncText [${text}]`);
+      return text;
+    } catch (promise) {
+      if (typeof promise.then === 'function') {
+        yieldForRenderer(`Suspend [${text}]`);
+      } else {
+        yieldForRenderer(`Error [${text}]`);
+      }
+      throw promise;
+    }
+  };
+
+  Text = ({text}) => {
+    yieldForRenderer(`Text [${text}]`);
+    return text;
   };
 }
 
@@ -457,7 +503,7 @@ describe('Profiler', () => {
         });
 
         // Only call profile updates for paths that have re-rendered
-        // Since "inner" is beneath a pure compoent, it isn't called
+        // Since "inner" is beneath a pure component, it isn't called
         expect(callback).toHaveBeenCalledTimes(2);
         expect(callback.mock.calls[0][0]).toBe('middle');
         expect(callback.mock.calls[1][0]).toBe('outer');
@@ -621,7 +667,7 @@ describe('Profiler', () => {
           // Simulate time moving forward while frame is paused.
           advanceTimeBy(50); // 10 -> 60
 
-          // Flush the remaninig work,
+          // Flush the remaining work,
           // Which should take an additional 10ms of simulated time.
           expect(renderer).toFlushAndYield(['Yield:10', 'Yield:17']);
           expect(callback).toHaveBeenCalledTimes(2);
@@ -2145,67 +2191,12 @@ describe('Profiler', () => {
     });
 
     describe('suspense', () => {
-      let AsyncText;
-      let Text;
-      let TextResource;
-      let cache;
-      let resourcePromise;
-
       function awaitableAdvanceTimers(ms) {
         jest.advanceTimersByTime(ms);
         // Wait until the end of the current tick
-        return new Promise(resolve => {
-          setImmediate(resolve);
-        });
+        // We cannot use a timer since we're faking them
+        return Promise.resolve().then(() => {});
       }
-
-      function yieldForRenderer(value) {
-        if (ReactNoop) {
-          ReactNoop.yield(value);
-        } else {
-          ReactTestRenderer.unstable_yield(value);
-        }
-      }
-
-      beforeEach(() => {
-        const ReactCache = require('react-cache');
-        function invalidateCache() {
-          cache = ReactCache.createCache(invalidateCache);
-        }
-        invalidateCache();
-
-        resourcePromise = null;
-
-        TextResource = ReactCache.createResource(([text, ms = 0]) => {
-          resourcePromise = new Promise((resolve, reject) =>
-            setTimeout(() => {
-              yieldForRenderer(`Promise resolved [${text}]`);
-              resolve(text);
-            }, ms),
-          );
-          return resourcePromise;
-        }, ([text, ms]) => text);
-
-        AsyncText = ({ms, text}) => {
-          try {
-            TextResource.read(cache, [text, ms]);
-            yieldForRenderer(`AsyncText [${text}]`);
-            return text;
-          } catch (promise) {
-            if (typeof promise.then === 'function') {
-              yieldForRenderer(`Suspend [${text}]`);
-            } else {
-              yieldForRenderer(`Error [${text}]`);
-            }
-            throw promise;
-          }
-        };
-
-        Text = ({text}) => {
-          yieldForRenderer(`Text [${text}]`);
-          return text;
-        };
-      });
 
       it('traces both the temporary placeholder and the finished render for an interaction', async () => {
         loadModulesForTracing({useNoopRenderer: true});
@@ -2228,9 +2219,9 @@ describe('Profiler', () => {
         SchedulerTracing.unstable_trace(interaction.name, mockNow(), () => {
           ReactNoop.render(
             <React.unstable_Profiler id="test-profiler" onRender={onRender}>
-              <React.unstable_Suspense fallback={<Text text="Loading..." />}>
+              <React.Suspense fallback={<Text text="Loading..." />}>
                 <AsyncText text="Async" ms={20000} />
-              </React.unstable_Suspense>
+              </React.Suspense>
               <Text text="Sync" />
               <Monkey ref={monkey} />
             </React.unstable_Profiler>,
@@ -2252,7 +2243,7 @@ describe('Profiler', () => {
           'Monkey',
         ]);
         // The update hasn't expired yet, so we commit nothing.
-        expect(ReactNoop.getChildren()).toEqual([]);
+        expect(ReactNoop.getChildrenAsJSX()).toEqual(null);
         expect(onRender).not.toHaveBeenCalled();
 
         // Advance both React's virtual time and Jest's timers by enough to expire
@@ -2263,10 +2254,7 @@ describe('Profiler', () => {
         // the placeholder.
         expect(ReactNoop.flushExpired()).toEqual([]);
         // Should have committed the placeholder.
-        expect(ReactNoop.getChildren()).toEqual([
-          {text: 'Loading...'},
-          {text: 'Sync'},
-        ]);
+        expect(ReactNoop.getChildrenAsJSX()).toEqual('Loading...Sync');
         expect(onRender).toHaveBeenCalledTimes(1);
 
         let call = onRender.mock.calls[0];
@@ -2289,10 +2277,7 @@ describe('Profiler', () => {
           'Promise resolved [Async]',
           'AsyncText [Async]',
         ]);
-        expect(ReactNoop.getChildren()).toEqual([
-          {text: 'Async'},
-          {text: 'Sync'},
-        ]);
+        expect(ReactNoop.getChildrenAsJSX()).toEqual('AsyncSync');
         expect(onRender).toHaveBeenCalledTimes(3);
 
         call = onRender.mock.calls[2];
@@ -2322,11 +2307,11 @@ describe('Profiler', () => {
           () => {
             ReactTestRenderer.create(
               <React.unstable_Profiler id="app" onRender={onRender}>
-                <React.unstable_Suspense
+                <React.Suspense
                   maxDuration={1000}
                   fallback={<Text text="loading" />}>
                   <AsyncText text="loaded" ms={2000} />
-                </React.unstable_Suspense>
+                </React.Suspense>
               </React.unstable_Profiler>,
             );
           },
@@ -2358,7 +2343,7 @@ describe('Profiler', () => {
 
           render() {
             const {ms, text} = this.props;
-            TextResource.read(cache, [text, ms]);
+            TextResource.read([text, ms]);
             return <span prop={text}>{this.state.hasMounted}</span>;
           }
         }
@@ -2376,11 +2361,11 @@ describe('Profiler', () => {
           () => {
             ReactTestRenderer.create(
               <React.unstable_Profiler id="app" onRender={onRender}>
-                <React.unstable_Suspense
+                <React.Suspense
                   maxDuration={1000}
                   fallback={<Text text="loading" />}>
                   <AsyncComponentWithCascadingWork text="loaded" ms={2000} />
-                </React.unstable_Suspense>
+                </React.Suspense>
               </React.unstable_Profiler>,
             );
           },
@@ -2416,11 +2401,11 @@ describe('Profiler', () => {
           () => {
             renderer = ReactTestRenderer.create(
               <React.unstable_Profiler id="app" onRender={onRender}>
-                <React.unstable_Suspense
+                <React.Suspense
                   maxDuration={1000}
                   fallback={<Text text="loading" />}>
                   <AsyncText text="loaded" ms={2000} />
-                </React.unstable_Suspense>
+                </React.Suspense>
               </React.unstable_Profiler>,
               {
                 unstable_isConcurrent: true,
@@ -2464,11 +2449,11 @@ describe('Profiler', () => {
           () => {
             renderer = ReactTestRenderer.create(
               <React.unstable_Profiler id="app" onRender={onRender}>
-                <React.unstable_Suspense
+                <React.Suspense
                   maxDuration={2000}
                   fallback={<Text text="loading" />}>
                   <AsyncText text="loaded" ms={1000} />
-                </React.unstable_Suspense>
+                </React.Suspense>
               </React.unstable_Profiler>,
               {unstable_isConcurrent: true},
             );
@@ -2503,11 +2488,11 @@ describe('Profiler', () => {
           () => {
             renderer = ReactTestRenderer.create(
               <React.unstable_Profiler id="app" onRender={onRender}>
-                <React.unstable_Suspense
+                <React.Suspense
                   maxDuration={2000}
                   fallback={<Text text="loading" />}>
                   <AsyncText text="loaded" ms={1000} />
-                </React.unstable_Suspense>
+                </React.Suspense>
                 <Text text="initial" />
               </React.unstable_Profiler>,
             );
@@ -2516,7 +2501,7 @@ describe('Profiler', () => {
         expect(renderer.toJSON()).toEqual(['loading', 'initial']);
 
         expect(onInteractionScheduledWorkCompleted).not.toHaveBeenCalled();
-        expect(onRender).toHaveBeenCalledTimes(2); // Sync null commit, placeholder commit
+        expect(onRender).toHaveBeenCalledTimes(1);
         expect(onRender.mock.calls[0][6]).toMatchInteractions([
           initialRenderInteraction,
         ]);
@@ -2537,11 +2522,11 @@ describe('Profiler', () => {
             () => {
               renderer.update(
                 <React.unstable_Profiler id="app" onRender={onRender}>
-                  <React.unstable_Suspense
+                  <React.Suspense
                     maxDuration={2000}
                     fallback={<Text text="loading" />}>
                     <AsyncText text="loaded" ms={1000} />
-                  </React.unstable_Suspense>
+                  </React.Suspense>
                   <Text text="updated" />
                 </React.unstable_Profiler>,
               );
@@ -2550,11 +2535,8 @@ describe('Profiler', () => {
         });
         expect(renderer.toJSON()).toEqual(['loading', 'updated']);
 
-        expect(onRender).toHaveBeenCalledTimes(2); // Sync null commit, placeholder commit
+        expect(onRender).toHaveBeenCalledTimes(1);
         expect(onRender.mock.calls[0][6]).toMatchInteractions([
-          highPriUpdateInteraction,
-        ]);
-        expect(onRender.mock.calls[1][6]).toMatchInteractions([
           highPriUpdateInteraction,
         ]);
         onRender.mockClear();
@@ -2599,11 +2581,11 @@ describe('Profiler', () => {
           () => {
             renderer = ReactTestRenderer.create(
               <React.unstable_Profiler id="app" onRender={onRender}>
-                <React.unstable_Suspense
+                <React.Suspense
                   maxDuration={2000}
                   fallback={<Text text="loading" />}>
                   <AsyncText text="loaded" ms={1000} />
-                </React.unstable_Suspense>
+                </React.Suspense>
                 <Text text="initial" />
               </React.unstable_Profiler>,
               {unstable_isConcurrent: true},
@@ -2637,11 +2619,11 @@ describe('Profiler', () => {
             () => {
               renderer.update(
                 <React.unstable_Profiler id="app" onRender={onRender}>
-                  <React.unstable_Suspense
+                  <React.Suspense
                     maxDuration={2000}
                     fallback={<Text text="loading" />}>
                     <AsyncText text="loaded" ms={1000} />
-                  </React.unstable_Suspense>
+                  </React.Suspense>
                   <Text text="updated" />
                 </React.unstable_Profiler>,
               );

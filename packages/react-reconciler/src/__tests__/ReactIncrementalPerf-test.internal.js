@@ -555,6 +555,65 @@ describe('ReactDebugFiberPerf', () => {
     expect(getFlameChart()).toMatchSnapshot();
   });
 
+  it('supports memo', () => {
+    const MemoFoo = React.memo(function Foo() {
+      return <div />;
+    });
+    ReactNoop.render(
+      <Parent>
+        <MemoFoo />
+      </Parent>,
+    );
+    ReactNoop.flush();
+    expect(getFlameChart()).toMatchSnapshot();
+  });
+
+  it('supports Suspense and lazy', async () => {
+    function Spinner() {
+      return <span />;
+    }
+
+    function fakeImport(result) {
+      return {default: result};
+    }
+
+    let resolve;
+    const LazyFoo = React.lazy(
+      () =>
+        new Promise(r => {
+          resolve = r;
+        }),
+    );
+
+    ReactNoop.render(
+      <Parent>
+        <React.Suspense fallback={<Spinner />}>
+          <LazyFoo />
+        </React.Suspense>
+      </Parent>,
+    );
+    ReactNoop.flush();
+    expect(getFlameChart()).toMatchSnapshot();
+
+    resolve(
+      fakeImport(function Foo() {
+        return <div />;
+      }),
+    );
+
+    await Promise.resolve();
+
+    ReactNoop.render(
+      <Parent>
+        <React.Suspense>
+          <LazyFoo />
+        </React.Suspense>
+      </Parent>,
+    );
+    ReactNoop.flush();
+    expect(getFlameChart()).toMatchSnapshot();
+  });
+
   it('does not schedule an extra callback if setState is called during a synchronous commit phase', () => {
     class Component extends React.Component {
       state = {step: 1};

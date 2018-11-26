@@ -8,31 +8,32 @@
  */
 
 import type {ReactProviderType, ReactContext} from 'shared/ReactTypes';
-import type {Fiber} from 'react-reconciler/src/ReactFiber';
+import type {Fiber} from './ReactFiber';
 import type {FiberRoot} from './ReactFiberRoot';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
+import type {SuspenseState} from './ReactFiberSuspenseComponent';
+
 import checkPropTypes from 'prop-types/checkPropTypes';
 
 import {
   IndeterminateComponent,
   FunctionComponent,
-  FunctionComponentLazy,
   ClassComponent,
-  ClassComponentLazy,
   HostRoot,
   HostComponent,
   HostText,
   HostPortal,
   ForwardRef,
-  ForwardRefLazy,
   Fragment,
   Mode,
   ContextProvider,
   ContextConsumer,
   Profiler,
   SuspenseComponent,
-  PureComponent,
-  PureComponentLazy,
+  MemoComponent,
+  SimpleMemoComponent,
+  LazyComponent,
+  IncompleteClassComponent,
 } from 'shared/ReactWorkTags';
 import {
   NoEffect,
@@ -55,8 +56,12 @@ import getComponentName from 'shared/getComponentName';
 import ReactStrictModeWarnings from './ReactStrictModeWarnings';
 import warning from 'shared/warning';
 import warningWithoutStack from 'shared/warningWithoutStack';
-import * as ReactCurrentFiber from './ReactCurrentFiber';
-import {cancelWorkTimer} from './ReactDebugFiberPerf';
+import {
+  setCurrentPhase,
+  getCurrentFiberOwnerNameInDevOrNull,
+  getCurrentFiberStackInDev,
+} from './ReactCurrentFiber';
+import {startWorkTimer, cancelWorkTimer} from './ReactDebugFiberPerf';
 
 import {
   mountChildFibers,
@@ -65,7 +70,12 @@ import {
 } from './ReactChildFiber';
 import {processUpdateQueue} from './ReactUpdateQueue';
 import {NoWork, Never} from './ReactFiberExpirationTime';
-import {ConcurrentMode, StrictMode} from './ReactTypeOfMode';
+import {
+  ConcurrentMode,
+  NoContext,
+  ProfileMode,
+  StrictMode,
+} from './ReactTypeOfMode';
 import {
   shouldSetTextContent,
   shouldDeprioritizeSubtree,
@@ -78,6 +88,7 @@ import {
   prepareToReadContext,
   calculateChangedBits,
 } from './ReactFiberNewContext';
+import {prepareToUseHooks, finishHooks, resetHooks} from './ReactFiberHooks';
 import {stopProfilerTimerIfRunning} from './ReactProfilerTimer';
 import {
   getMaskedContext,
@@ -101,9 +112,17 @@ import {
   resumeMountClassInstance,
   updateClassInstance,
 } from './ReactFiberClassComponent';
-import {readLazyComponentType} from './ReactFiberLazyComponent';
-import {getResultFromResolvedThenable} from 'shared/ReactLazyComponent';
-import {resolveLazyComponentTag} from './ReactFiber';
+import {
+  readLazyComponentType,
+  resolveDefaultProps,
+} from './ReactFiberLazyComponent';
+import {
+  resolveLazyComponentTag,
+  createFiberFromTypeAndProps,
+  createFiberFromFragment,
+  createWorkInProgress,
+  isSimpleFunctionComponent,
+} from './ReactFiber';
 
 const ReactCurrentOwner = ReactSharedInternals.ReactCurrentOwner;
 
@@ -111,12 +130,14 @@ let didWarnAboutBadClass;
 let didWarnAboutContextTypeOnFunctionComponent;
 let didWarnAboutGetDerivedStateOnFunctionComponent;
 let didWarnAboutFunctionRefs;
+export let didWarnAboutReassigningProps;
 
 if (__DEV__) {
   didWarnAboutBadClass = {};
   didWarnAboutContextTypeOnFunctionComponent = {};
   didWarnAboutGetDerivedStateOnFunctionComponent = {};
   didWarnAboutFunctionRefs = {};
+  didWarnAboutReassigningProps = false;
 }
 
 export function reconcileChildren(
@@ -187,85 +208,26 @@ function forceUnmountCurrentAndReconcile(
 function updateForwardRef(
   current: Fiber | null,
   workInProgress: Fiber,
-  type: any,
-  nextProps: any,
-  renderExpirationTime: ExpirationTime,
-) {
-  const render = type.render;
-  const ref = workInProgress.ref;
-  if (hasLegacyContextChanged()) {
-    // Normally we can bail out on props equality but if context has changed
-    // we don't do the bailout and we have to reuse existing props instead.
-  } else if (workInProgress.memoizedProps === nextProps) {
-    const currentRef = current !== null ? current.ref : null;
-    if (ref === currentRef) {
-      return bailoutOnAlreadyFinishedWork(
-        current,
-        workInProgress,
-        renderExpirationTime,
-      );
-    }
-  }
-
-  let nextChildren;
-  if (__DEV__) {
-    ReactCurrentOwner.current = workInProgress;
-    ReactCurrentFiber.setCurrentPhase('render');
-    nextChildren = render(nextProps, ref);
-    ReactCurrentFiber.setCurrentPhase(null);
-  } else {
-    nextChildren = render(nextProps, ref);
-  }
-
-  reconcileChildren(
-    current,
-    workInProgress,
-    nextChildren,
-    renderExpirationTime,
-  );
-  memoizeProps(workInProgress, nextProps);
-  return workInProgress.child;
-}
-
-function updatePureComponent(
-  current: Fiber | null,
-  workInProgress: Fiber,
   Component: any,
   nextProps: any,
-  updateExpirationTime,
   renderExpirationTime: ExpirationTime,
 ) {
   const render = Component.render;
-
-  if (
-    current !== null &&
-    (updateExpirationTime === NoWork ||
-      updateExpirationTime > renderExpirationTime)
-  ) {
-    const prevProps = current.memoizedProps;
-    // Default to shallow comparison
-    let compare = Component.compare;
-    compare = compare !== null ? compare : shallowEqual;
-    if (compare(prevProps, nextProps)) {
-      return bailoutOnAlreadyFinishedWork(
-        current,
-        workInProgress,
-        renderExpirationTime,
-      );
-    }
-  }
+  const ref = workInProgress.ref;
 
   // The rest is a fork of updateFunctionComponent
   let nextChildren;
   prepareToReadContext(workInProgress, renderExpirationTime);
+  prepareToUseHooks(current, workInProgress, renderExpirationTime);
   if (__DEV__) {
     ReactCurrentOwner.current = workInProgress;
-    ReactCurrentFiber.setCurrentPhase('render');
-    nextChildren = render(nextProps);
-    ReactCurrentFiber.setCurrentPhase(null);
+    setCurrentPhase('render');
+    nextChildren = render(nextProps, ref);
+    setCurrentPhase(null);
   } else {
-    nextChildren = render(nextProps);
+    nextChildren = render(nextProps, ref);
   }
+  nextChildren = finishHooks(render, nextProps, nextChildren, ref);
 
   // React DevTools reads this flag.
   workInProgress.effectTag |= PerformedWork;
@@ -275,8 +237,112 @@ function updatePureComponent(
     nextChildren,
     renderExpirationTime,
   );
-  memoizeProps(workInProgress, nextProps);
   return workInProgress.child;
+}
+
+function updateMemoComponent(
+  current: Fiber | null,
+  workInProgress: Fiber,
+  Component: any,
+  nextProps: any,
+  updateExpirationTime,
+  renderExpirationTime: ExpirationTime,
+): null | Fiber {
+  if (current === null) {
+    let type = Component.type;
+    if (
+      isSimpleFunctionComponent(type) &&
+      Component.compare === null &&
+      // SimpleMemoComponent codepath doesn't resolve outer props either.
+      Component.defaultProps === undefined
+    ) {
+      // If this is a plain function component without default props,
+      // and with only the default shallow comparison, we upgrade it
+      // to a SimpleMemoComponent to allow fast path updates.
+      workInProgress.tag = SimpleMemoComponent;
+      workInProgress.type = type;
+      if (__DEV__) {
+        validateFunctionComponentInDev(workInProgress, type);
+      }
+      return updateSimpleMemoComponent(
+        current,
+        workInProgress,
+        type,
+        nextProps,
+        updateExpirationTime,
+        renderExpirationTime,
+      );
+    }
+    let child = createFiberFromTypeAndProps(
+      Component.type,
+      null,
+      nextProps,
+      null,
+      workInProgress.mode,
+      renderExpirationTime,
+    );
+    child.ref = workInProgress.ref;
+    child.return = workInProgress;
+    workInProgress.child = child;
+    return child;
+  }
+  let currentChild = ((current.child: any): Fiber); // This is always exactly one child
+  if (updateExpirationTime < renderExpirationTime) {
+    // This will be the props with resolved defaultProps,
+    // unlike current.memoizedProps which will be the unresolved ones.
+    const prevProps = currentChild.memoizedProps;
+    // Default to shallow comparison
+    let compare = Component.compare;
+    compare = compare !== null ? compare : shallowEqual;
+    if (compare(prevProps, nextProps) && current.ref === workInProgress.ref) {
+      return bailoutOnAlreadyFinishedWork(
+        current,
+        workInProgress,
+        renderExpirationTime,
+      );
+    }
+  }
+  // React DevTools reads this flag.
+  workInProgress.effectTag |= PerformedWork;
+  let newChild = createWorkInProgress(
+    currentChild,
+    nextProps,
+    renderExpirationTime,
+  );
+  newChild.ref = workInProgress.ref;
+  newChild.return = workInProgress;
+  workInProgress.child = newChild;
+  return newChild;
+}
+
+function updateSimpleMemoComponent(
+  current: Fiber | null,
+  workInProgress: Fiber,
+  Component: any,
+  nextProps: any,
+  updateExpirationTime,
+  renderExpirationTime: ExpirationTime,
+): null | Fiber {
+  if (current !== null && updateExpirationTime < renderExpirationTime) {
+    const prevProps = current.memoizedProps;
+    if (
+      shallowEqual(prevProps, nextProps) &&
+      current.ref === workInProgress.ref
+    ) {
+      return bailoutOnAlreadyFinishedWork(
+        current,
+        workInProgress,
+        renderExpirationTime,
+      );
+    }
+  }
+  return updateFunctionComponent(
+    current,
+    workInProgress,
+    Component,
+    nextProps,
+    renderExpirationTime,
+  );
 }
 
 function updateFragment(
@@ -291,7 +357,6 @@ function updateFragment(
     nextChildren,
     renderExpirationTime,
   );
-  memoizeProps(workInProgress, nextChildren);
   return workInProgress.child;
 }
 
@@ -307,7 +372,6 @@ function updateMode(
     nextChildren,
     renderExpirationTime,
   );
-  memoizeProps(workInProgress, nextChildren);
   return workInProgress.child;
 }
 
@@ -327,7 +391,6 @@ function updateProfiler(
     nextChildren,
     renderExpirationTime,
   );
-  memoizeProps(workInProgress, nextProps);
   return workInProgress.child;
 }
 
@@ -354,14 +417,16 @@ function updateFunctionComponent(
 
   let nextChildren;
   prepareToReadContext(workInProgress, renderExpirationTime);
+  prepareToUseHooks(current, workInProgress, renderExpirationTime);
   if (__DEV__) {
     ReactCurrentOwner.current = workInProgress;
-    ReactCurrentFiber.setCurrentPhase('render');
+    setCurrentPhase('render');
     nextChildren = Component(nextProps, context);
-    ReactCurrentFiber.setCurrentPhase(null);
+    setCurrentPhase(null);
   } else {
     nextChildren = Component(nextProps, context);
   }
+  nextChildren = finishHooks(Component, nextProps, nextChildren, context);
 
   // React DevTools reads this flag.
   workInProgress.effectTag |= PerformedWork;
@@ -371,7 +436,6 @@ function updateFunctionComponent(
     nextChildren,
     renderExpirationTime,
   );
-  memoizeProps(workInProgress, nextProps);
   return workInProgress.child;
 }
 
@@ -394,32 +458,41 @@ function updateClassComponent(
   }
   prepareToReadContext(workInProgress, renderExpirationTime);
 
+  const instance = workInProgress.stateNode;
   let shouldUpdate;
-  if (current === null) {
-    if (workInProgress.stateNode === null) {
-      // In the initial pass we might need to construct the instance.
-      constructClassInstance(
-        workInProgress,
-        Component,
-        nextProps,
-        renderExpirationTime,
-      );
-      mountClassInstance(
-        workInProgress,
-        Component,
-        nextProps,
-        renderExpirationTime,
-      );
-      shouldUpdate = true;
-    } else {
-      // In a resume, we'll already have an instance we can reuse.
-      shouldUpdate = resumeMountClassInstance(
-        workInProgress,
-        Component,
-        nextProps,
-        renderExpirationTime,
-      );
+  if (instance === null) {
+    if (current !== null) {
+      // An class component without an instance only mounts if it suspended
+      // inside a non- concurrent tree, in an inconsistent state. We want to
+      // tree it like a new mount, even though an empty version of it already
+      // committed. Disconnect the alternate pointers.
+      current.alternate = null;
+      workInProgress.alternate = null;
+      // Since this is conceptually a new fiber, schedule a Placement effect
+      workInProgress.effectTag |= Placement;
     }
+    // In the initial pass we might need to construct the instance.
+    constructClassInstance(
+      workInProgress,
+      Component,
+      nextProps,
+      renderExpirationTime,
+    );
+    mountClassInstance(
+      workInProgress,
+      Component,
+      nextProps,
+      renderExpirationTime,
+    );
+    shouldUpdate = true;
+  } else if (current === null) {
+    // In a resume, we'll already have an instance we can reuse.
+    shouldUpdate = resumeMountClassInstance(
+      workInProgress,
+      Component,
+      nextProps,
+      renderExpirationTime,
+    );
   } else {
     shouldUpdate = updateClassInstance(
       current,
@@ -429,7 +502,7 @@ function updateClassComponent(
       renderExpirationTime,
     );
   }
-  return finishClassComponent(
+  const nextUnitOfWork = finishClassComponent(
     current,
     workInProgress,
     Component,
@@ -437,6 +510,19 @@ function updateClassComponent(
     hasContext,
     renderExpirationTime,
   );
+  if (__DEV__) {
+    let inst = workInProgress.stateNode;
+    if (inst.props !== nextProps) {
+      warning(
+        didWarnAboutReassigningProps,
+        'It looks like %s is reassigning its own `this.props` while rendering. ' +
+          'This is not supported and can lead to confusing bugs.',
+        getComponentName(workInProgress.type) || 'a component',
+      );
+      didWarnAboutReassigningProps = true;
+    }
+  }
+  return nextUnitOfWork;
 }
 
 function finishClassComponent(
@@ -486,7 +572,7 @@ function finishClassComponent(
     }
   } else {
     if (__DEV__) {
-      ReactCurrentFiber.setCurrentPhase('render');
+      setCurrentPhase('render');
       nextChildren = instance.render();
       if (
         debugRenderPhaseSideEffects ||
@@ -495,7 +581,7 @@ function finishClassComponent(
       ) {
         instance.render();
       }
-      ReactCurrentFiber.setCurrentPhase(null);
+      setCurrentPhase(null);
     } else {
       nextChildren = instance.render();
     }
@@ -523,10 +609,9 @@ function finishClassComponent(
     );
   }
 
-  // Memoize props and state using the values we just used to render.
+  // Memoize state using the values we just used to render.
   // TODO: Restructure so we never read values from the instance.
-  memoizeState(workInProgress, instance.state);
-  memoizeProps(workInProgress, instance.props);
+  workInProgress.memoizedState = instance.state;
 
   // The context might have changed so we need to recalculate it.
   if (hasContext) {
@@ -660,7 +745,6 @@ function updateHostComponent(current, workInProgress, renderExpirationTime) {
   ) {
     // Schedule this fiber to re-render at offscreen priority. Then bailout.
     workInProgress.expirationTime = Never;
-    workInProgress.memoizedProps = nextProps;
     return null;
   }
 
@@ -670,7 +754,6 @@ function updateHostComponent(current, workInProgress, renderExpirationTime) {
     nextChildren,
     renderExpirationTime,
   );
-  memoizeProps(workInProgress, nextProps);
   return workInProgress.child;
 }
 
@@ -678,116 +761,178 @@ function updateHostText(current, workInProgress) {
   if (current === null) {
     tryToClaimNextHydratableInstance(workInProgress);
   }
-  const nextProps = workInProgress.pendingProps;
-  memoizeProps(workInProgress, nextProps);
   // Nothing to do here. This is terminal. We'll do the completion step
   // immediately after.
   return null;
 }
 
-function resolveDefaultProps(Component, baseProps) {
-  if (Component && Component.defaultProps) {
-    // Resolve default props. Taken from ReactElement
-    const props = Object.assign({}, baseProps);
-    const defaultProps = Component.defaultProps;
-    for (let propName in defaultProps) {
-      if (props[propName] === undefined) {
-        props[propName] = defaultProps[propName];
-      }
-    }
-    return props;
-  }
-  return baseProps;
-}
-
-function mountIndeterminateComponent(
-  current,
+function mountLazyComponent(
+  _current,
   workInProgress,
-  Component,
+  elementType,
   updateExpirationTime,
   renderExpirationTime,
 ) {
-  invariant(
-    current === null,
-    'An indeterminate component should never have mounted. This error is ' +
-      'likely caused by a bug in React. Please file an issue.',
-  );
-
-  const props = workInProgress.pendingProps;
-  if (
-    typeof Component === 'object' &&
-    Component !== null &&
-    typeof Component.then === 'function'
-  ) {
-    Component = readLazyComponentType(Component);
-    const resolvedTag = (workInProgress.tag = resolveLazyComponentTag(
-      workInProgress,
-      Component,
-    ));
-    const resolvedProps = resolveDefaultProps(Component, props);
-    let child;
-    switch (resolvedTag) {
-      case FunctionComponentLazy: {
-        child = updateFunctionComponent(
-          current,
-          workInProgress,
-          Component,
-          resolvedProps,
-          renderExpirationTime,
-        );
-        break;
-      }
-      case ClassComponentLazy: {
-        child = updateClassComponent(
-          current,
-          workInProgress,
-          Component,
-          resolvedProps,
-          renderExpirationTime,
-        );
-        break;
-      }
-      case ForwardRefLazy: {
-        child = updateForwardRef(
-          current,
-          workInProgress,
-          Component,
-          resolvedProps,
-          renderExpirationTime,
-        );
-        break;
-      }
-      case PureComponentLazy: {
-        child = updatePureComponent(
-          current,
-          workInProgress,
-          Component,
-          resolvedProps,
-          updateExpirationTime,
-          renderExpirationTime,
-        );
-        break;
-      }
-      default: {
-        // This message intentionally doesn't metion ForwardRef or PureComponent
-        // because the fact that it's a separate type of work is an
-        // implementation detail.
-        invariant(
-          false,
-          'Element type is invalid. Received a promise that resolves to: %s. ' +
-            'Promise elements must resolve to a class or function.',
-          Component,
-        );
-      }
-    }
-    workInProgress.memoizedProps = props;
-    return child;
+  if (_current !== null) {
+    // An lazy component only mounts if it suspended inside a non-
+    // concurrent tree, in an inconsistent state. We want to treat it like
+    // a new mount, even though an empty version of it already committed.
+    // Disconnect the alternate pointers.
+    _current.alternate = null;
+    workInProgress.alternate = null;
+    // Since this is conceptually a new fiber, schedule a Placement effect
+    workInProgress.effectTag |= Placement;
   }
 
+  const props = workInProgress.pendingProps;
+  // We can't start a User Timing measurement with correct label yet.
+  // Cancel and resume right after we know the tag.
+  cancelWorkTimer(workInProgress);
+  let Component = readLazyComponentType(elementType);
+  // Store the unwrapped component in the type.
+  workInProgress.type = Component;
+  const resolvedTag = (workInProgress.tag = resolveLazyComponentTag(Component));
+  startWorkTimer(workInProgress);
+  const resolvedProps = resolveDefaultProps(Component, props);
+  let child;
+  switch (resolvedTag) {
+    case FunctionComponent: {
+      child = updateFunctionComponent(
+        null,
+        workInProgress,
+        Component,
+        resolvedProps,
+        renderExpirationTime,
+      );
+      break;
+    }
+    case ClassComponent: {
+      child = updateClassComponent(
+        null,
+        workInProgress,
+        Component,
+        resolvedProps,
+        renderExpirationTime,
+      );
+      break;
+    }
+    case ForwardRef: {
+      child = updateForwardRef(
+        null,
+        workInProgress,
+        Component,
+        resolvedProps,
+        renderExpirationTime,
+      );
+      break;
+    }
+    case MemoComponent: {
+      child = updateMemoComponent(
+        null,
+        workInProgress,
+        Component,
+        resolveDefaultProps(Component.type, resolvedProps), // The inner type can have defaults too
+        updateExpirationTime,
+        renderExpirationTime,
+      );
+      break;
+    }
+    default: {
+      // This message intentionally doesn't mention ForwardRef or MemoComponent
+      // because the fact that it's a separate type of work is an
+      // implementation detail.
+      invariant(
+        false,
+        'Element type is invalid. Received a promise that resolves to: %s. ' +
+          'Promise elements must resolve to a class or function.',
+        Component,
+      );
+    }
+  }
+  return child;
+}
+
+function mountIncompleteClassComponent(
+  _current,
+  workInProgress,
+  Component,
+  nextProps,
+  renderExpirationTime,
+) {
+  if (_current !== null) {
+    // An incomplete component only mounts if it suspended inside a non-
+    // concurrent tree, in an inconsistent state. We want to treat it like
+    // a new mount, even though an empty version of it already committed.
+    // Disconnect the alternate pointers.
+    _current.alternate = null;
+    workInProgress.alternate = null;
+    // Since this is conceptually a new fiber, schedule a Placement effect
+    workInProgress.effectTag |= Placement;
+  }
+
+  // Promote the fiber to a class and try rendering again.
+  workInProgress.tag = ClassComponent;
+
+  // The rest of this function is a fork of `updateClassComponent`
+
+  // Push context providers early to prevent context stack mismatches.
+  // During mounting we don't know the child context yet as the instance doesn't exist.
+  // We will invalidate the child context in finishClassComponent() right after rendering.
+  let hasContext;
+  if (isLegacyContextProvider(Component)) {
+    hasContext = true;
+    pushLegacyContextProvider(workInProgress);
+  } else {
+    hasContext = false;
+  }
+  prepareToReadContext(workInProgress, renderExpirationTime);
+
+  constructClassInstance(
+    workInProgress,
+    Component,
+    nextProps,
+    renderExpirationTime,
+  );
+  mountClassInstance(
+    workInProgress,
+    Component,
+    nextProps,
+    renderExpirationTime,
+  );
+
+  return finishClassComponent(
+    null,
+    workInProgress,
+    Component,
+    true,
+    hasContext,
+    renderExpirationTime,
+  );
+}
+
+function mountIndeterminateComponent(
+  _current,
+  workInProgress,
+  Component,
+  renderExpirationTime,
+) {
+  if (_current !== null) {
+    // An indeterminate component only mounts if it suspended inside a non-
+    // concurrent tree, in an inconsistent state. We want to treat it like
+    // a new mount, even though an empty version of it already committed.
+    // Disconnect the alternate pointers.
+    _current.alternate = null;
+    workInProgress.alternate = null;
+    // Since this is conceptually a new fiber, schedule a Placement effect
+    workInProgress.effectTag |= Placement;
+  }
+
+  const props = workInProgress.pendingProps;
   const unmaskedContext = getUnmaskedContext(workInProgress, Component, false);
   const context = getMaskedContext(workInProgress, unmaskedContext);
 
   prepareToReadContext(workInProgress, renderExpirationTime);
+  prepareToUseHooks(null, workInProgress, renderExpirationTime);
 
   let value;
 
@@ -831,6 +976,9 @@ function mountIndeterminateComponent(
     // Proceed under the assumption that this is a class instance
     workInProgress.tag = ClassComponent;
 
+    // Throw out any hooks that were used.
+    resetHooks();
+
     // Push context providers early to prevent context stack mismatches.
     // During mounting we don't know the child context yet as the instance doesn't exist.
     // We will invalidate the child context in finishClassComponent() right after rendering.
@@ -858,7 +1006,7 @@ function mountIndeterminateComponent(
     adoptClassInstance(workInProgress, value);
     mountClassInstance(workInProgress, Component, props, renderExpirationTime);
     return finishClassComponent(
-      current,
+      null,
       workInProgress,
       Component,
       true,
@@ -868,69 +1016,73 @@ function mountIndeterminateComponent(
   } else {
     // Proceed under the assumption that this is a function component
     workInProgress.tag = FunctionComponent;
+    value = finishHooks(Component, props, value, context);
+    reconcileChildren(null, workInProgress, value, renderExpirationTime);
     if (__DEV__) {
-      if (Component) {
-        warningWithoutStack(
-          !Component.childContextTypes,
-          '%s(...): childContextTypes cannot be defined on a function component.',
-          Component.displayName || Component.name || 'Component',
-        );
-      }
-      if (workInProgress.ref !== null) {
-        let info = '';
-        const ownerName = ReactCurrentFiber.getCurrentFiberOwnerNameInDevOrNull();
-        if (ownerName) {
-          info += '\n\nCheck the render method of `' + ownerName + '`.';
-        }
-
-        let warningKey = ownerName || workInProgress._debugID || '';
-        const debugSource = workInProgress._debugSource;
-        if (debugSource) {
-          warningKey = debugSource.fileName + ':' + debugSource.lineNumber;
-        }
-        if (!didWarnAboutFunctionRefs[warningKey]) {
-          didWarnAboutFunctionRefs[warningKey] = true;
-          warning(
-            false,
-            'Function components cannot be given refs. ' +
-              'Attempts to access this ref will fail.%s',
-            info,
-          );
-        }
-      }
-
-      if (typeof Component.getDerivedStateFromProps === 'function') {
-        const componentName = getComponentName(Component) || 'Unknown';
-
-        if (!didWarnAboutGetDerivedStateOnFunctionComponent[componentName]) {
-          warningWithoutStack(
-            false,
-            '%s: Function components do not support getDerivedStateFromProps.',
-            componentName,
-          );
-          didWarnAboutGetDerivedStateOnFunctionComponent[componentName] = true;
-        }
-      }
-
-      if (
-        typeof Component.contextType === 'object' &&
-        Component.contextType !== null
-      ) {
-        const componentName = getComponentName(Component) || 'Unknown';
-
-        if (!didWarnAboutContextTypeOnFunctionComponent[componentName]) {
-          warningWithoutStack(
-            false,
-            '%s: Function components do not support contextType.',
-            componentName,
-          );
-          didWarnAboutContextTypeOnFunctionComponent[componentName] = true;
-        }
-      }
+      validateFunctionComponentInDev(workInProgress, Component);
     }
-    reconcileChildren(current, workInProgress, value, renderExpirationTime);
-    memoizeProps(workInProgress, props);
     return workInProgress.child;
+  }
+}
+
+function validateFunctionComponentInDev(workInProgress: Fiber, Component: any) {
+  if (Component) {
+    warningWithoutStack(
+      !Component.childContextTypes,
+      '%s(...): childContextTypes cannot be defined on a function component.',
+      Component.displayName || Component.name || 'Component',
+    );
+  }
+  if (workInProgress.ref !== null) {
+    let info = '';
+    const ownerName = getCurrentFiberOwnerNameInDevOrNull();
+    if (ownerName) {
+      info += '\n\nCheck the render method of `' + ownerName + '`.';
+    }
+
+    let warningKey = ownerName || workInProgress._debugID || '';
+    const debugSource = workInProgress._debugSource;
+    if (debugSource) {
+      warningKey = debugSource.fileName + ':' + debugSource.lineNumber;
+    }
+    if (!didWarnAboutFunctionRefs[warningKey]) {
+      didWarnAboutFunctionRefs[warningKey] = true;
+      warning(
+        false,
+        'Function components cannot be given refs. ' +
+          'Attempts to access this ref will fail.%s',
+        info,
+      );
+    }
+  }
+
+  if (typeof Component.getDerivedStateFromProps === 'function') {
+    const componentName = getComponentName(Component) || 'Unknown';
+
+    if (!didWarnAboutGetDerivedStateOnFunctionComponent[componentName]) {
+      warningWithoutStack(
+        false,
+        '%s: Function components do not support getDerivedStateFromProps.',
+        componentName,
+      );
+      didWarnAboutGetDerivedStateOnFunctionComponent[componentName] = true;
+    }
+  }
+
+  if (
+    typeof Component.contextType === 'object' &&
+    Component.contextType !== null
+  ) {
+    const componentName = getComponentName(Component) || 'Unknown';
+
+    if (!didWarnAboutContextTypeOnFunctionComponent[componentName]) {
+      warningWithoutStack(
+        false,
+        '%s: Function components do not support contextType.',
+        componentName,
+      );
+      didWarnAboutContextTypeOnFunctionComponent[componentName] = true;
+    }
   }
 }
 
@@ -939,67 +1091,263 @@ function updateSuspenseComponent(
   workInProgress,
   renderExpirationTime,
 ) {
+  const mode = workInProgress.mode;
   const nextProps = workInProgress.pendingProps;
 
-  // Check if we already attempted to render the normal state. If we did,
-  // and we timed out, render the placeholder state.
-  const alreadyCaptured = (workInProgress.effectTag & DidCapture) === NoEffect;
+  // We should attempt to render the primary children unless this boundary
+  // already suspended during this render (`alreadyCaptured` is true).
+  let nextState: SuspenseState | null = workInProgress.memoizedState;
 
   let nextDidTimeout;
-  if (current !== null && workInProgress.updateQueue !== null) {
-    // We're outside strict mode. Something inside this Placeholder boundary
-    // suspended during the last commit. Switch to the placholder.
-    workInProgress.updateQueue = null;
-    nextDidTimeout = true;
+  if ((workInProgress.effectTag & DidCapture) === NoEffect) {
+    // This is the first attempt.
+    nextState = null;
+    nextDidTimeout = false;
   } else {
-    nextDidTimeout = !alreadyCaptured;
+    // Something in this boundary's subtree already suspended. Switch to
+    // rendering the fallback children.
+    nextState = {
+      timedOutAt: nextState !== null ? nextState.timedOutAt : NoWork,
+    };
+    nextDidTimeout = true;
+    workInProgress.effectTag &= ~DidCapture;
   }
 
-  if ((workInProgress.mode & StrictMode) !== NoEffect) {
+  // This next part is a bit confusing. If the children timeout, we switch to
+  // showing the fallback children in place of the "primary" children.
+  // However, we don't want to delete the primary children because then their
+  // state will be lost (both the React state and the host state, e.g.
+  // uncontrolled form inputs). Instead we keep them mounted and hide them.
+  // Both the fallback children AND the primary children are rendered at the
+  // same time. Once the primary children are un-suspended, we can delete
+  // the fallback children — don't need to preserve their state.
+  //
+  // The two sets of children are siblings in the host environment, but
+  // semantically, for purposes of reconciliation, they are two separate sets.
+  // So we store them using two fragment fibers.
+  //
+  // However, we want to avoid allocating extra fibers for every placeholder.
+  // They're only necessary when the children time out, because that's the
+  // only time when both sets are mounted.
+  //
+  // So, the extra fragment fibers are only used if the children time out.
+  // Otherwise, we render the primary children directly. This requires some
+  // custom reconciliation logic to preserve the state of the primary
+  // children. It's essentially a very basic form of re-parenting.
+
+  // `child` points to the child fiber. In the normal case, this is the first
+  // fiber of the primary children set. In the timed-out case, it's a
+  // a fragment fiber containing the primary children.
+  let child;
+  // `next` points to the next fiber React should render. In the normal case,
+  // it's the same as `child`: the first fiber of the primary children set.
+  // In the timed-out case, it's a fragment fiber containing the *fallback*
+  // children -- we skip over the primary children entirely.
+  let next;
+  if (current === null) {
+    // This is the initial mount. This branch is pretty simple because there's
+    // no previous state that needs to be preserved.
     if (nextDidTimeout) {
-      // If the timed-out view commits, schedule an update effect to record
-      // the committed time.
-      workInProgress.effectTag |= Update;
+      // Mount separate fragments for primary and fallback children.
+      const nextFallbackChildren = nextProps.fallback;
+      const primaryChildFragment = createFiberFromFragment(
+        null,
+        mode,
+        NoWork,
+        null,
+      );
+
+      if ((workInProgress.mode & ConcurrentMode) === NoContext) {
+        // Outside of concurrent mode, we commit the effects from the
+        // partially completed, timed-out tree, too.
+        const progressedState: SuspenseState = workInProgress.memoizedState;
+        const progressedPrimaryChild: Fiber | null =
+          progressedState !== null
+            ? (workInProgress.child: any).child
+            : (workInProgress.child: any);
+        primaryChildFragment.child = progressedPrimaryChild;
+      }
+
+      const fallbackChildFragment = createFiberFromFragment(
+        nextFallbackChildren,
+        mode,
+        renderExpirationTime,
+        null,
+      );
+      primaryChildFragment.sibling = fallbackChildFragment;
+      child = primaryChildFragment;
+      // Skip the primary children, and continue working on the
+      // fallback children.
+      next = fallbackChildFragment;
+      child.return = next.return = workInProgress;
     } else {
-      // The state node points to the time at which placeholder timed out.
-      // We can clear it once we switch back to the normal children.
-      workInProgress.stateNode = null;
+      // Mount the primary children without an intermediate fragment fiber.
+      const nextPrimaryChildren = nextProps.children;
+      child = next = mountChildFibers(
+        workInProgress,
+        null,
+        nextPrimaryChildren,
+        renderExpirationTime,
+      );
+    }
+  } else {
+    // This is an update. This branch is more complicated because we need to
+    // ensure the state of the primary children is preserved.
+    const prevState = current.memoizedState;
+    const prevDidTimeout = prevState !== null;
+    if (prevDidTimeout) {
+      // The current tree already timed out. That means each child set is
+      // wrapped in a fragment fiber.
+      const currentPrimaryChildFragment: Fiber = (current.child: any);
+      const currentFallbackChildFragment: Fiber = (currentPrimaryChildFragment.sibling: any);
+      if (nextDidTimeout) {
+        // Still timed out. Reuse the current primary children by cloning
+        // its fragment. We're going to skip over these entirely.
+        const nextFallbackChildren = nextProps.fallback;
+        const primaryChildFragment = createWorkInProgress(
+          currentPrimaryChildFragment,
+          currentPrimaryChildFragment.pendingProps,
+          NoWork,
+        );
+
+        if ((workInProgress.mode & ConcurrentMode) === NoContext) {
+          // Outside of concurrent mode, we commit the effects from the
+          // partially completed, timed-out tree, too.
+          const progressedState: SuspenseState = workInProgress.memoizedState;
+          const progressedPrimaryChild: Fiber | null =
+            progressedState !== null
+              ? (workInProgress.child: any).child
+              : (workInProgress.child: any);
+          if (progressedPrimaryChild !== currentPrimaryChildFragment.child) {
+            primaryChildFragment.child = progressedPrimaryChild;
+          }
+        }
+
+        // Because primaryChildFragment is a new fiber that we're inserting as the
+        // parent of a new tree, we need to set its treeBaseDuration.
+        if (enableProfilerTimer && workInProgress.mode & ProfileMode) {
+          // treeBaseDuration is the sum of all the child tree base durations.
+          let treeBaseDuration = 0;
+          let hiddenChild = primaryChildFragment.child;
+          while (hiddenChild !== null) {
+            treeBaseDuration += hiddenChild.treeBaseDuration;
+            hiddenChild = hiddenChild.sibling;
+          }
+          primaryChildFragment.treeBaseDuration = treeBaseDuration;
+        }
+
+        // Clone the fallback child fragment, too. These we'll continue
+        // working on.
+        const fallbackChildFragment = (primaryChildFragment.sibling = createWorkInProgress(
+          currentFallbackChildFragment,
+          nextFallbackChildren,
+          currentFallbackChildFragment.expirationTime,
+        ));
+        child = primaryChildFragment;
+        primaryChildFragment.childExpirationTime = NoWork;
+        // Skip the primary children, and continue working on the
+        // fallback children.
+        next = fallbackChildFragment;
+        child.return = next.return = workInProgress;
+      } else {
+        // No longer suspended. Switch back to showing the primary children,
+        // and remove the intermediate fragment fiber.
+        const nextPrimaryChildren = nextProps.children;
+        const currentPrimaryChild = currentPrimaryChildFragment.child;
+        const primaryChild = reconcileChildFibers(
+          workInProgress,
+          currentPrimaryChild,
+          nextPrimaryChildren,
+          renderExpirationTime,
+        );
+
+        // If this render doesn't suspend, we need to delete the fallback
+        // children. Wait until the complete phase, after we've confirmed the
+        // fallback is no longer needed.
+        // TODO: Would it be better to store the fallback fragment on
+        // the stateNode?
+
+        // Continue rendering the children, like we normally do.
+        child = next = primaryChild;
+      }
+    } else {
+      // The current tree has not already timed out. That means the primary
+      // children are not wrapped in a fragment fiber.
+      const currentPrimaryChild = current.child;
+      if (nextDidTimeout) {
+        // Timed out. Wrap the children in a fragment fiber to keep them
+        // separate from the fallback children.
+        const nextFallbackChildren = nextProps.fallback;
+        const primaryChildFragment = createFiberFromFragment(
+          // It shouldn't matter what the pending props are because we aren't
+          // going to render this fragment.
+          null,
+          mode,
+          NoWork,
+          null,
+        );
+        primaryChildFragment.child = currentPrimaryChild;
+
+        // Even though we're creating a new fiber, there are no new children,
+        // because we're reusing an already mounted tree. So we don't need to
+        // schedule a placement.
+        // primaryChildFragment.effectTag |= Placement;
+
+        if ((workInProgress.mode & ConcurrentMode) === NoContext) {
+          // Outside of concurrent mode, we commit the effects from the
+          // partially completed, timed-out tree, too.
+          const progressedState: SuspenseState = workInProgress.memoizedState;
+          const progressedPrimaryChild: Fiber | null =
+            progressedState !== null
+              ? (workInProgress.child: any).child
+              : (workInProgress.child: any);
+          primaryChildFragment.child = progressedPrimaryChild;
+        }
+
+        // Because primaryChildFragment is a new fiber that we're inserting as the
+        // parent of a new tree, we need to set its treeBaseDuration.
+        if (enableProfilerTimer && workInProgress.mode & ProfileMode) {
+          // treeBaseDuration is the sum of all the child tree base durations.
+          let treeBaseDuration = 0;
+          let hiddenChild = primaryChildFragment.child;
+          while (hiddenChild !== null) {
+            treeBaseDuration += hiddenChild.treeBaseDuration;
+            hiddenChild = hiddenChild.sibling;
+          }
+          primaryChildFragment.treeBaseDuration = treeBaseDuration;
+        }
+
+        // Create a fragment from the fallback children, too.
+        const fallbackChildFragment = (primaryChildFragment.sibling = createFiberFromFragment(
+          nextFallbackChildren,
+          mode,
+          renderExpirationTime,
+          null,
+        ));
+        fallbackChildFragment.effectTag |= Placement;
+        child = primaryChildFragment;
+        primaryChildFragment.childExpirationTime = NoWork;
+        // Skip the primary children, and continue working on the
+        // fallback children.
+        next = fallbackChildFragment;
+        child.return = next.return = workInProgress;
+      } else {
+        // Still haven't timed out.  Continue rendering the children, like we
+        // normally do.
+        const nextPrimaryChildren = nextProps.children;
+        next = child = reconcileChildFibers(
+          workInProgress,
+          currentPrimaryChild,
+          nextPrimaryChildren,
+          renderExpirationTime,
+        );
+      }
     }
   }
 
-  // If the `children` prop is a function, treat it like a render prop.
-  // TODO: This is temporary until we finalize a lower level API.
-  const children = nextProps.children;
-  let nextChildren;
-  if (typeof children === 'function') {
-    nextChildren = children(nextDidTimeout);
-  } else {
-    nextChildren = nextDidTimeout ? nextProps.fallback : children;
-  }
-
-  if (current !== null && nextDidTimeout !== workInProgress.memoizedState) {
-    // We're about to switch from the placeholder children to the normal
-    // children, or vice versa. These are two different conceptual sets that
-    // happen to be stored in the same set. Call this special function to
-    // force the new set not to match with the current set.
-    // TODO: The proper way to model this is by storing each set separately.
-    forceUnmountCurrentAndReconcile(
-      current,
-      workInProgress,
-      nextChildren,
-      renderExpirationTime,
-    );
-  } else {
-    reconcileChildren(
-      current,
-      workInProgress,
-      nextChildren,
-      renderExpirationTime,
-    );
-  }
-  workInProgress.memoizedProps = nextProps;
-  workInProgress.memoizedState = nextDidTimeout;
-  return workInProgress.child;
+  workInProgress.memoizedState = nextState;
+  workInProgress.child = child;
+  return next;
 }
 
 function updatePortalComponent(
@@ -1021,7 +1369,6 @@ function updatePortalComponent(
       nextChildren,
       renderExpirationTime,
     );
-    memoizeProps(workInProgress, nextChildren);
   } else {
     reconcileChildren(
       current,
@@ -1029,7 +1376,6 @@ function updatePortalComponent(
       nextChildren,
       renderExpirationTime,
     );
-    memoizeProps(workInProgress, nextChildren);
   }
   return workInProgress.child;
 }
@@ -1046,7 +1392,6 @@ function updateContextProvider(
   const oldProps = workInProgress.memoizedProps;
 
   const newValue = newProps.value;
-  workInProgress.memoizedProps = newProps;
 
   if (__DEV__) {
     const providerPropTypes = workInProgress.type.propTypes;
@@ -1057,7 +1402,7 @@ function updateContextProvider(
         newProps,
         'prop',
         'Context.Provider',
-        ReactCurrentFiber.getCurrentFiberStackInDev,
+        getCurrentFiberStackInDev,
       );
     }
   }
@@ -1096,12 +1441,40 @@ function updateContextProvider(
   return workInProgress.child;
 }
 
+let hasWarnedAboutUsingContextAsConsumer = false;
+
 function updateContextConsumer(
   current: Fiber | null,
   workInProgress: Fiber,
   renderExpirationTime: ExpirationTime,
 ) {
-  const context: ReactContext<any> = workInProgress.type;
+  let context: ReactContext<any> = workInProgress.type;
+  // The logic below for Context differs depending on PROD or DEV mode. In
+  // DEV mode, we create a separate object for Context.Consumer that acts
+  // like a proxy to Context. This proxy object adds unnecessary code in PROD
+  // so we use the old behaviour (Context.Consumer references Context) to
+  // reduce size and overhead. The separate object references context via
+  // a property called "_context", which also gives us the ability to check
+  // in DEV mode if this property exists or not and warn if it does not.
+  if (__DEV__) {
+    if ((context: any)._context === undefined) {
+      // This may be because it's a Context (rather than a Consumer).
+      // Or it may be because it's older React where they're the same thing.
+      // We only want to warn if we're sure it's a new React.
+      if (context !== context.Consumer) {
+        if (!hasWarnedAboutUsingContextAsConsumer) {
+          hasWarnedAboutUsingContextAsConsumer = true;
+          warning(
+            false,
+            'Rendering <Context> directly is not supported and will be removed in ' +
+              'a future major release. Did you mean to render <Context.Consumer> instead?',
+          );
+        }
+      }
+    } else {
+      context = (context: any)._context;
+    }
+  }
   const newProps = workInProgress.pendingProps;
   const render = newProps.children;
 
@@ -1120,9 +1493,9 @@ function updateContextConsumer(
   let newChildren;
   if (__DEV__) {
     ReactCurrentOwner.current = workInProgress;
-    ReactCurrentFiber.setCurrentPhase('render');
+    setCurrentPhase('render');
     newChildren = render(newValue);
-    ReactCurrentFiber.setCurrentPhase(null);
+    setCurrentPhase(null);
   } else {
     newChildren = render(newValue);
   }
@@ -1130,28 +1503,8 @@ function updateContextConsumer(
   // React DevTools reads this flag.
   workInProgress.effectTag |= PerformedWork;
   reconcileChildren(current, workInProgress, newChildren, renderExpirationTime);
-  workInProgress.memoizedProps = newProps;
   return workInProgress.child;
 }
-
-/*
-  function reuseChildrenEffects(returnFiber : Fiber, firstChild : Fiber) {
-    let child = firstChild;
-    do {
-      // Ensure that the first and last effect of the parent corresponds
-      // to the children's first and last effect.
-      if (!returnFiber.firstEffect) {
-        returnFiber.firstEffect = child.firstEffect;
-      }
-      if (child.lastEffect) {
-        if (returnFiber.lastEffect) {
-          returnFiber.lastEffect.nextEffect = child.firstEffect;
-        }
-        returnFiber.lastEffect = child.lastEffect;
-      }
-    } while (child = child.sibling);
-  }
-  */
 
 function bailoutOnAlreadyFinishedWork(
   current: Fiber | null,
@@ -1172,10 +1525,7 @@ function bailoutOnAlreadyFinishedWork(
 
   // Check if the children have any pending work.
   const childExpirationTime = workInProgress.childExpirationTime;
-  if (
-    childExpirationTime === NoWork ||
-    childExpirationTime > renderExpirationTime
-  ) {
+  if (childExpirationTime < renderExpirationTime) {
     // The children don't have any work either. We can skip them.
     // TODO: Once we add back resuming, we should check if the children are
     // a work-in-progress set. If so, we need to transfer their effects.
@@ -1186,17 +1536,6 @@ function bailoutOnAlreadyFinishedWork(
     cloneChildFibers(current, workInProgress);
     return workInProgress.child;
   }
-}
-
-// TODO: Delete memoizeProps/State and move to reconcile/bailout instead
-function memoizeProps(workInProgress: Fiber, nextProps: any) {
-  workInProgress.memoizedProps = nextProps;
-}
-
-function memoizeState(workInProgress: Fiber, nextState: any) {
-  workInProgress.memoizedState = nextState;
-  // Don't reset the updateQueue, in case there are pending updates. Resetting
-  // is handled by processUpdateQueue.
 }
 
 function beginWork(
@@ -1212,8 +1551,7 @@ function beginWork(
     if (
       oldProps === newProps &&
       !hasLegacyContextChanged() &&
-      (updateExpirationTime === NoWork ||
-        updateExpirationTime > renderExpirationTime)
+      updateExpirationTime < renderExpirationTime
     ) {
       // This fiber does not have any pending work. Bailout without entering
       // the begin phase. There's still some bookkeeping we that needs to be done
@@ -1228,14 +1566,6 @@ function beginWork(
           break;
         case ClassComponent: {
           const Component = workInProgress.type;
-          if (isLegacyContextProvider(Component)) {
-            pushLegacyContextProvider(workInProgress);
-          }
-          break;
-        }
-        case ClassComponentLazy: {
-          const thenable = workInProgress.type;
-          const Component = getResultFromResolvedThenable(thenable);
           if (isLegacyContextProvider(Component)) {
             pushLegacyContextProvider(workInProgress);
           }
@@ -1257,6 +1587,47 @@ function beginWork(
             workInProgress.effectTag |= Update;
           }
           break;
+        case SuspenseComponent: {
+          const state: SuspenseState | null = workInProgress.memoizedState;
+          const didTimeout = state !== null;
+          if (didTimeout) {
+            // If this boundary is currently timed out, we need to decide
+            // whether to retry the primary children, or to skip over it and
+            // go straight to the fallback. Check the priority of the primary
+            // child fragment.
+            const primaryChildFragment: Fiber = (workInProgress.child: any);
+            const primaryChildExpirationTime =
+              primaryChildFragment.childExpirationTime;
+            if (
+              primaryChildExpirationTime !== NoWork &&
+              primaryChildExpirationTime >= renderExpirationTime
+            ) {
+              // The primary children have pending work. Use the normal path
+              // to attempt to render the primary children again.
+              return updateSuspenseComponent(
+                current,
+                workInProgress,
+                renderExpirationTime,
+              );
+            } else {
+              // The primary children do not have pending work with sufficient
+              // priority. Bailout.
+              const child = bailoutOnAlreadyFinishedWork(
+                current,
+                workInProgress,
+                renderExpirationTime,
+              );
+              if (child !== null) {
+                // The fallback children have pending work. Skip over the
+                // primary children and work on the fallback.
+                return child.sibling;
+              } else {
+                return null;
+              }
+            }
+          }
+          break;
+        }
       }
       return bailoutOnAlreadyFinishedWork(
         current,
@@ -1271,11 +1642,20 @@ function beginWork(
 
   switch (workInProgress.tag) {
     case IndeterminateComponent: {
-      const Component = workInProgress.type;
+      const elementType = workInProgress.elementType;
       return mountIndeterminateComponent(
         current,
         workInProgress,
-        Component,
+        elementType,
+        renderExpirationTime,
+      );
+    }
+    case LazyComponent: {
+      const elementType = workInProgress.elementType;
+      return mountLazyComponent(
+        current,
+        workInProgress,
+        elementType,
         updateExpirationTime,
         renderExpirationTime,
       );
@@ -1283,52 +1663,32 @@ function beginWork(
     case FunctionComponent: {
       const Component = workInProgress.type;
       const unresolvedProps = workInProgress.pendingProps;
+      const resolvedProps =
+        workInProgress.elementType === Component
+          ? unresolvedProps
+          : resolveDefaultProps(Component, unresolvedProps);
       return updateFunctionComponent(
         current,
         workInProgress,
         Component,
-        unresolvedProps,
+        resolvedProps,
         renderExpirationTime,
       );
-    }
-    case FunctionComponentLazy: {
-      const thenable = workInProgress.type;
-      const Component = getResultFromResolvedThenable(thenable);
-      const unresolvedProps = workInProgress.pendingProps;
-      const child = updateFunctionComponent(
-        current,
-        workInProgress,
-        Component,
-        resolveDefaultProps(Component, unresolvedProps),
-        renderExpirationTime,
-      );
-      workInProgress.memoizedProps = unresolvedProps;
-      return child;
     }
     case ClassComponent: {
       const Component = workInProgress.type;
       const unresolvedProps = workInProgress.pendingProps;
+      const resolvedProps =
+        workInProgress.elementType === Component
+          ? unresolvedProps
+          : resolveDefaultProps(Component, unresolvedProps);
       return updateClassComponent(
         current,
         workInProgress,
         Component,
-        unresolvedProps,
+        resolvedProps,
         renderExpirationTime,
       );
-    }
-    case ClassComponentLazy: {
-      const thenable = workInProgress.type;
-      const Component = getResultFromResolvedThenable(thenable);
-      const unresolvedProps = workInProgress.pendingProps;
-      const child = updateClassComponent(
-        current,
-        workInProgress,
-        Component,
-        resolveDefaultProps(Component, unresolvedProps),
-        renderExpirationTime,
-      );
-      workInProgress.memoizedProps = unresolvedProps;
-      return child;
     }
     case HostRoot:
       return updateHostRoot(current, workInProgress, renderExpirationTime);
@@ -1350,27 +1710,18 @@ function beginWork(
       );
     case ForwardRef: {
       const type = workInProgress.type;
+      const unresolvedProps = workInProgress.pendingProps;
+      const resolvedProps =
+        workInProgress.elementType === type
+          ? unresolvedProps
+          : resolveDefaultProps(type, unresolvedProps);
       return updateForwardRef(
         current,
         workInProgress,
         type,
-        workInProgress.pendingProps,
+        resolvedProps,
         renderExpirationTime,
       );
-    }
-    case ForwardRefLazy: {
-      const thenable = workInProgress.type;
-      const Component = getResultFromResolvedThenable(thenable);
-      const unresolvedProps = workInProgress.pendingProps;
-      const child = updateForwardRef(
-        current,
-        workInProgress,
-        Component,
-        resolveDefaultProps(Component, unresolvedProps),
-        renderExpirationTime,
-      );
-      workInProgress.memoizedProps = unresolvedProps;
-      return child;
     }
     case Fragment:
       return updateFragment(current, workInProgress, renderExpirationTime);
@@ -1390,31 +1741,45 @@ function beginWork(
         workInProgress,
         renderExpirationTime,
       );
-    case PureComponent: {
+    case MemoComponent: {
       const type = workInProgress.type;
-      return updatePureComponent(
+      const unresolvedProps = workInProgress.pendingProps;
+      // Resolve outer props first, then resolve inner props.
+      let resolvedProps = resolveDefaultProps(type, unresolvedProps);
+      resolvedProps = resolveDefaultProps(type.type, resolvedProps);
+      return updateMemoComponent(
         current,
         workInProgress,
         type,
+        resolvedProps,
+        updateExpirationTime,
+        renderExpirationTime,
+      );
+    }
+    case SimpleMemoComponent: {
+      return updateSimpleMemoComponent(
+        current,
+        workInProgress,
+        workInProgress.type,
         workInProgress.pendingProps,
         updateExpirationTime,
         renderExpirationTime,
       );
     }
-    case PureComponentLazy: {
-      const thenable = workInProgress.type;
-      const Component = getResultFromResolvedThenable(thenable);
+    case IncompleteClassComponent: {
+      const Component = workInProgress.type;
       const unresolvedProps = workInProgress.pendingProps;
-      const child = updatePureComponent(
+      const resolvedProps =
+        workInProgress.elementType === Component
+          ? unresolvedProps
+          : resolveDefaultProps(Component, unresolvedProps);
+      return mountIncompleteClassComponent(
         current,
         workInProgress,
         Component,
-        resolveDefaultProps(Component, unresolvedProps),
-        updateExpirationTime,
+        resolvedProps,
         renderExpirationTime,
       );
-      workInProgress.memoizedProps = unresolvedProps;
-      return child;
     }
     default:
       invariant(

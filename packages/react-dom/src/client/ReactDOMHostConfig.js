@@ -23,10 +23,13 @@ import {
   warnForInsertedHydratedElement,
   warnForInsertedHydratedText,
 } from './ReactDOMComponent';
-import * as ReactInputSelection from './ReactInputSelection';
+import {getSelectionInformation, restoreSelection} from './ReactInputSelection';
 import setTextContent from './setTextContent';
 import {validateDOMNesting, updatedAncestorInfo} from './validateDOMNesting';
-import * as ReactBrowserEventEmitter from '../events/ReactBrowserEventEmitter';
+import {
+  isEnabled as ReactBrowserEventEmitterIsEnabled,
+  setEnabled as ReactBrowserEventEmitterSetEnabled,
+} from '../events/ReactBrowserEventEmitter';
 import {getChildNamespace} from '../shared/DOMNamespaces';
 import {
   ELEMENT_NODE,
@@ -35,6 +38,7 @@ import {
   DOCUMENT_NODE,
   DOCUMENT_FRAGMENT_NODE,
 } from '../shared/HTMLNodeType';
+import dangerousStyleValue from '../shared/dangerousStyleValue';
 
 import type {DOMContainer} from './ReactDOM';
 
@@ -45,6 +49,9 @@ export type Props = {
   hidden?: boolean,
   suppressHydrationWarning?: boolean,
   dangerouslySetInnerHTML?: mixed,
+  style?: {
+    display?: string,
+  },
 };
 export type Container = Element | Document;
 export type Instance = Element;
@@ -65,6 +72,7 @@ export type NoTimeout = -1;
 export {
   unstable_now as now,
   unstable_scheduleCallback as scheduleDeferredCallback,
+  unstable_shouldYield as shouldYield,
   unstable_cancelCallback as cancelDeferredCallback,
 } from 'scheduler';
 
@@ -72,6 +80,8 @@ let SUPPRESS_HYDRATION_WARNING;
 if (__DEV__) {
   SUPPRESS_HYDRATION_WARNING = 'suppressHydrationWarning';
 }
+
+const STYLE = 'style';
 
 let eventsEnabled: ?boolean = null;
 let selectionInformation: ?mixed = null;
@@ -145,15 +155,15 @@ export function getPublicInstance(instance: Instance): * {
 }
 
 export function prepareForCommit(containerInfo: Container): void {
-  eventsEnabled = ReactBrowserEventEmitter.isEnabled();
-  selectionInformation = ReactInputSelection.getSelectionInformation();
-  ReactBrowserEventEmitter.setEnabled(false);
+  eventsEnabled = ReactBrowserEventEmitterIsEnabled();
+  selectionInformation = getSelectionInformation();
+  ReactBrowserEventEmitterSetEnabled(false);
 }
 
 export function resetAfterCommit(containerInfo: Container): void {
-  ReactInputSelection.restoreSelection(selectionInformation);
+  restoreSelection(selectionInformation);
   selectionInformation = null;
-  ReactBrowserEventEmitter.setEnabled(eventsEnabled);
+  ReactBrowserEventEmitterSetEnabled(eventsEnabled);
   eventsEnabled = null;
 }
 
@@ -278,8 +288,13 @@ export function createTextInstance(
 }
 
 export const isPrimaryRenderer = true;
-export const scheduleTimeout = setTimeout;
-export const cancelTimeout = clearTimeout;
+// This initialization code may run even on server environments
+// if a component just imports ReactDOM (e.g. for findDOMNode).
+// Some environments might not have setTimeout or clearTimeout.
+export const scheduleTimeout =
+  typeof setTimeout === 'function' ? setTimeout : (undefined: any);
+export const cancelTimeout =
+  typeof clearTimeout === 'function' ? clearTimeout : (undefined: any);
 export const noTimeout = -1;
 
 // -------------------
@@ -409,6 +424,36 @@ export function removeChildFromContainer(
   } else {
     container.removeChild(child);
   }
+}
+
+export function hideInstance(instance: Instance): void {
+  // TODO: Does this work for all element types? What about MathML? Should we
+  // pass host context to this method?
+  instance = ((instance: any): HTMLElement);
+  instance.style.display = 'none';
+}
+
+export function hideTextInstance(textInstance: TextInstance): void {
+  textInstance.nodeValue = '';
+}
+
+export function unhideInstance(instance: Instance, props: Props): void {
+  instance = ((instance: any): HTMLElement);
+  const styleProp = props[STYLE];
+  const display =
+    styleProp !== undefined &&
+    styleProp !== null &&
+    styleProp.hasOwnProperty('display')
+      ? styleProp.display
+      : null;
+  instance.style.display = dangerousStyleValue('display', display);
+}
+
+export function unhideTextInstance(
+  textInstance: TextInstance,
+  text: string,
+): void {
+  textInstance.nodeValue = text;
 }
 
 // -------------------

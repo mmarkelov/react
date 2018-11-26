@@ -64,33 +64,26 @@ describe('SchedulerDOM', () => {
   let currentTime = 0;
 
   beforeEach(() => {
-    // TODO pull this into helper method, reduce repetition.
-    // mock the browser APIs which are used in schedule:
-    // - requestAnimationFrame should pass the DOMHighResTimeStamp argument
-    // - calling 'window.postMessage' should actually fire postmessage handlers
-    // - Date.now should return the correct thing
-    // - test with native performance.now()
     delete global.performance;
     global.requestAnimationFrame = function(cb) {
       return rAFCallbacks.push(() => {
         cb(startOfLatestFrame);
       });
     };
-    const originalAddEventListener = global.addEventListener;
-    postMessageCallback = null;
     postMessageEvents = [];
     postMessageErrors = [];
-    global.addEventListener = function(eventName, callback, useCapture) {
-      if (eventName === 'message') {
-        postMessageCallback = callback;
-      } else {
-        originalAddEventListener(eventName, callback, useCapture);
-      }
+    const port1 = {};
+    const port2 = {
+      postMessage(messageKey) {
+        const postMessageEvent = {source: port2, data: messageKey};
+        postMessageEvents.push(postMessageEvent);
+      },
     };
-    global.postMessage = function(messageKey, targetOrigin) {
-      const postMessageEvent = {source: window, data: messageKey};
-      postMessageEvents.push(postMessageEvent);
+    global.MessageChannel = function MessageChannel() {
+      this.port1 = port1;
+      this.port2 = port2;
     };
+    postMessageCallback = () => port1.onmessage();
     global.Date.now = function() {
       return currentTime;
     };
@@ -105,9 +98,6 @@ describe('SchedulerDOM', () => {
       scheduleCallback(cb);
       advanceOneFrame({timeLeftInFrame: 15});
       expect(cb).toHaveBeenCalledTimes(1);
-      // should not have timed out and should include a timeRemaining method
-      expect(cb.mock.calls[0][0].didTimeout).toBe(false);
-      expect(typeof cb.mock.calls[0][0].timeRemaining()).toBe('number');
     });
 
     it('inserts its rAF callback as early into the queue as possible', () => {
@@ -144,16 +134,6 @@ describe('SchedulerDOM', () => {
         // after a delay, calls as many callbacks as it has time for
         advanceOneFrame({timeLeftInFrame: 15});
         expect(callbackLog).toEqual(['A', 'B']);
-        // callbackA should not have timed out and should include a timeRemaining method
-        expect(callbackA.mock.calls[0][0].didTimeout).toBe(false);
-        expect(typeof callbackA.mock.calls[0][0].timeRemaining()).toBe(
-          'number',
-        );
-        // callbackA should not have timed out and should include a timeRemaining method
-        expect(callbackB.mock.calls[0][0].didTimeout).toBe(false);
-        expect(typeof callbackB.mock.calls[0][0].timeRemaining()).toBe(
-          'number',
-        );
       });
 
       it("accepts callbacks betweeen animationFrame and postMessage and doesn't stall", () => {

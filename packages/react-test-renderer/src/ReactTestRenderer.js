@@ -11,15 +11,19 @@ import type {Fiber} from 'react-reconciler/src/ReactFiber';
 import type {FiberRoot} from 'react-reconciler/src/ReactFiberRoot';
 import type {Instance, TextInstance} from './ReactTestHostConfig';
 
-import * as TestRenderer from 'react-reconciler/inline.test';
+import {
+  getPublicRootInstance,
+  createContainer,
+  updateContainer,
+  flushSync,
+  injectIntoDevTools,
+} from 'react-reconciler/inline.test';
 import {batchedUpdates} from 'events/ReactGenericBatching';
 import {findCurrentFiberUsingSlowPath} from 'react-reconciler/reflection';
 import {
   Fragment,
   FunctionComponent,
-  FunctionComponentLazy,
   ClassComponent,
-  ClassComponentLazy,
   HostComponent,
   HostPortal,
   HostText,
@@ -29,15 +33,21 @@ import {
   Mode,
   ForwardRef,
   Profiler,
-  ForwardRefLazy,
-  PureComponent,
-  PureComponentLazy,
+  MemoComponent,
+  SimpleMemoComponent,
+  IncompleteClassComponent,
 } from 'shared/ReactWorkTags';
 import invariant from 'shared/invariant';
 import ReactVersion from 'shared/ReactVersion';
 
-import * as ReactTestHostConfig from './ReactTestHostConfig';
-import * as TestRendererScheduling from './ReactTestRendererScheduling';
+import {getPublicInstance} from './ReactTestHostConfig';
+import {
+  flushAll,
+  flushNumberOfYields,
+  clearYields,
+  setNowImplementation,
+  yieldValue,
+} from './ReactTestRendererScheduling';
 
 type TestRendererOptions = {
   createNodeMock: (element: React$Element<any>) => any,
@@ -66,11 +76,17 @@ const defaultTestOptions = {
   },
 };
 
-function toJSON(inst: Instance | TextInstance): ReactTestRendererNode {
+function toJSON(inst: Instance | TextInstance): ReactTestRendererNode | null {
+  if (inst.isHidden) {
+    // Omit timed out children from output entirely. This seems like the least
+    // surprising behavior. We could perhaps add a separate API that includes
+    // them, if it turns out people need it.
+    return null;
+  }
   switch (inst.tag) {
     case 'TEXT':
       return inst.text;
-    case 'INSTANCE':
+    case 'INSTANCE': {
       /* eslint-disable no-unused-vars */
       // We don't include the `children` prop in JSON.
       // Instead, we will include the actual rendered children.
@@ -78,7 +94,16 @@ function toJSON(inst: Instance | TextInstance): ReactTestRendererNode {
       /* eslint-enable */
       let renderedChildren = null;
       if (inst.children && inst.children.length) {
-        renderedChildren = inst.children.map(toJSON);
+        for (let i = 0; i < inst.children.length; i++) {
+          const renderedChild = toJSON(inst.children[i]);
+          if (renderedChild !== null) {
+            if (renderedChildren === null) {
+              renderedChildren = [renderedChild];
+            } else {
+              renderedChildren.push(renderedChild);
+            }
+          }
+        }
       }
       const json: ReactTestRendererJSON = {
         type: inst.type,
@@ -89,6 +114,7 @@ function toJSON(inst: Instance | TextInstance): ReactTestRendererNode {
         value: Symbol.for('react.test.json'),
       });
       return json;
+    }
     default:
       throw new Error(`Unexpected node type in toJSON: ${inst.tag}`);
   }
@@ -153,18 +179,8 @@ function toTree(node: ?Fiber) {
         instance: node.stateNode,
         rendered: childrenToTree(node.child),
       };
-    case ClassComponentLazy: {
-      const thenable = node.type;
-      const type = thenable._reactResult;
-      return {
-        nodeType: 'component',
-        type,
-        props: {...node.memoizedProps},
-        instance: node.stateNode,
-        rendered: childrenToTree(node.child),
-      };
-    }
     case FunctionComponent:
+    case SimpleMemoComponent:
       return {
         nodeType: 'component',
         type: node.type,
@@ -172,17 +188,6 @@ function toTree(node: ?Fiber) {
         instance: null,
         rendered: childrenToTree(node.child),
       };
-    case FunctionComponentLazy: {
-      const thenable = node.type;
-      const type = thenable._reactResult;
-      return {
-        nodeType: 'component',
-        type: type,
-        props: {...node.memoizedProps},
-        instance: node.stateNode,
-        rendered: childrenToTree(node.child),
-      };
-    }
     case HostComponent: {
       return {
         nodeType: 'host',
@@ -200,9 +205,8 @@ function toTree(node: ?Fiber) {
     case Mode:
     case Profiler:
     case ForwardRef:
-    case ForwardRefLazy:
-    case PureComponent:
-    case PureComponentLazy:
+    case MemoComponent:
+    case IncompleteClassComponent:
       return childrenToTree(node.child);
     default:
       invariant(
@@ -215,14 +219,11 @@ function toTree(node: ?Fiber) {
 
 const validWrapperTypes = new Set([
   FunctionComponent,
-  FunctionComponentLazy,
   ClassComponent,
-  ClassComponentLazy,
   HostComponent,
   ForwardRef,
-  ForwardRefLazy,
-  PureComponent,
-  PureComponentLazy,
+  MemoComponent,
+  SimpleMemoComponent,
   // Normally skipped, but used when there's more than one root child.
   HostRoot,
 ]);
@@ -288,7 +289,7 @@ class ReactTestInstance {
 
   get instance() {
     if (this._fiber.tag === HostComponent) {
-      return ReactTestHostConfig.getPublicInstance(this._fiber.stateNode);
+      return getPublicInstance(this._fiber.stateNode);
     } else {
       return this._fiber.stateNode;
     }
@@ -439,13 +440,13 @@ const ReactTestRendererFiber = {
       createNodeMock,
       tag: 'CONTAINER',
     };
-    let root: FiberRoot | null = TestRenderer.createContainer(
+    let root: FiberRoot | null = createContainer(
       container,
       isConcurrent,
       false,
     );
     invariant(root != null, 'something went wrong');
-    TestRenderer.updateContainer(element, root, null, null);
+    updateContainer(element, root, null, null);
 
     const entry = {
       root: undefined, // makes flow happy
@@ -460,7 +461,21 @@ const ReactTestRendererFiber = {
         if (container.children.length === 1) {
           return toJSON(container.children[0]);
         }
-        return container.children.map(toJSON);
+
+        let renderedChildren = null;
+        if (container.children && container.children.length) {
+          for (let i = 0; i < container.children.length; i++) {
+            const renderedChild = toJSON(container.children[i]);
+            if (renderedChild !== null) {
+              if (renderedChildren === null) {
+                renderedChildren = [renderedChild];
+              } else {
+                renderedChildren.push(renderedChild);
+              }
+            }
+          }
+        }
+        return renderedChildren;
       },
       toTree() {
         if (root == null || root.current == null) {
@@ -472,13 +487,13 @@ const ReactTestRendererFiber = {
         if (root == null || root.current == null) {
           return;
         }
-        TestRenderer.updateContainer(newElement, root, null, null);
+        updateContainer(newElement, root, null, null);
       },
       unmount() {
         if (root == null || root.current == null) {
           return;
         }
-        TestRenderer.updateContainer(null, root, null, null);
+        updateContainer(null, root, null, null);
         container = null;
         root = null;
       },
@@ -486,16 +501,16 @@ const ReactTestRendererFiber = {
         if (root == null || root.current == null) {
           return null;
         }
-        return TestRenderer.getPublicRootInstance(root);
+        return getPublicRootInstance(root);
       },
 
-      unstable_flushAll: TestRendererScheduling.flushAll,
+      unstable_flushAll: flushAll,
       unstable_flushSync<T>(fn: () => T): T {
-        TestRendererScheduling.clearYields();
-        return TestRenderer.flushSync(fn);
+        clearYields();
+        return flushSync(fn);
       },
-      unstable_flushNumberOfYields: TestRendererScheduling.flushNumberOfYields,
-      unstable_clearYields: TestRendererScheduling.clearYields,
+      unstable_flushNumberOfYields: flushNumberOfYields,
+      unstable_clearYields: clearYields,
     };
 
     Object.defineProperty(
@@ -526,14 +541,14 @@ const ReactTestRendererFiber = {
     return entry;
   },
 
-  unstable_yield: TestRendererScheduling.yieldValue,
-  unstable_clearYields: TestRendererScheduling.clearYields,
+  unstable_yield: yieldValue,
+  unstable_clearYields: clearYields,
 
   /* eslint-disable camelcase */
   unstable_batchedUpdates: batchedUpdates,
   /* eslint-enable camelcase */
 
-  unstable_setNowImplementation: TestRendererScheduling.setNowImplementation,
+  unstable_setNowImplementation: setNowImplementation,
 };
 
 const fiberToWrapper = new WeakMap();
@@ -550,7 +565,7 @@ function wrapFiber(fiber: Fiber): ReactTestInstance {
 }
 
 // Enable ReactTestRenderer to be used to test DevTools integration.
-TestRenderer.injectIntoDevTools({
+injectIntoDevTools({
   findFiberByHostInstance: (() => {
     throw new Error('TestRenderer does not support findFiberByHostInstance()');
   }: any),

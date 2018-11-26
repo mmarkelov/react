@@ -15,11 +15,13 @@ import typeof * as PersistentFeatureFlagsType from './ReactFeatureFlags.persiste
 export const debugRenderPhaseSideEffects = false;
 export const debugRenderPhaseSideEffectsForStrictMode = false;
 export const enableUserTimingAPI = __DEV__;
+export const enableHooks = true;
 export const warnAboutDeprecatedLifecycles = false;
 export const replayFailedUnitOfWorkWithInvokeGuardedCallback = false;
 export const enableProfilerTimer = false;
 export const enableSchedulerTracing = false;
 export const enableSuspenseServerRenderer = false;
+export const enableStableConcurrentModeAPIs = false;
 
 // Only used in www builds.
 export function addUserTimingListener() {

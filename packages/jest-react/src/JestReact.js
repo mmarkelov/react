@@ -30,33 +30,31 @@ function assertYieldsWereCleared(root) {
   invariant(
     actualYields.length === 0,
     'Log of yielded values is not empty. ' +
-      'Call expect(ReactTestRenderer).toHaveYielded(...) first.',
+      'Call expect(ReactTestRenderer).unstable_toHaveYielded(...) first.',
   );
 }
 
-export function toFlushAndYield(root, expectedYields) {
+export function unstable_toFlushAndYield(root, expectedYields) {
+  assertYieldsWereCleared(root);
+  const actualYields = root.unstable_flushAll();
   return captureAssertion(() => {
-    assertYieldsWereCleared(root);
-    const actualYields = root.unstable_flushAll();
     expect(actualYields).toEqual(expectedYields);
   });
 }
 
-export function toFlushAndYieldThrough(root, expectedYields) {
+export function unstable_toFlushAndYieldThrough(root, expectedYields) {
+  assertYieldsWereCleared(root);
+  const actualYields = root.unstable_flushNumberOfYields(expectedYields.length);
   return captureAssertion(() => {
-    assertYieldsWereCleared(root);
-    const actualYields = root.unstable_flushNumberOfYields(
-      expectedYields.length,
-    );
     expect(actualYields).toEqual(expectedYields);
   });
 }
 
-export function toFlushWithoutYielding(root) {
-  return toFlushAndYield(root, []);
+export function unstable_toFlushWithoutYielding(root) {
+  return unstable_toFlushAndYield(root, []);
 }
 
-export function toHaveYielded(ReactTestRenderer, expectedYields) {
+export function unstable_toHaveYielded(ReactTestRenderer, expectedYields) {
   return captureAssertion(() => {
     if (
       ReactTestRenderer === null ||
@@ -65,9 +63,9 @@ export function toHaveYielded(ReactTestRenderer, expectedYields) {
     ) {
       invariant(
         false,
-        'The matcher `toHaveYielded` expects an instance of React Test ' +
+        'The matcher `unstable_toHaveYielded` expects an instance of React Test ' +
           'Renderer.\n\nTry: ' +
-          'expect(ReactTestRenderer).toHaveYielded(expectedYields)',
+          'expect(ReactTestRenderer).unstable_toHaveYielded(expectedYields)',
       );
     }
     const actualYields = ReactTestRenderer.unstable_clearYields();
@@ -75,16 +73,17 @@ export function toHaveYielded(ReactTestRenderer, expectedYields) {
   });
 }
 
-export function toFlushAndThrow(root, ...rest) {
+export function unstable_toFlushAndThrow(root, ...rest) {
+  assertYieldsWereCleared(root);
   return captureAssertion(() => {
-    assertYieldsWereCleared(root);
     expect(() => {
       root.unstable_flushAll();
     }).toThrow(...rest);
   });
 }
 
-export function toMatchRenderedOutput(root, expectedJSX) {
+export function unstable_toMatchRenderedOutput(root, expectedJSX) {
+  assertYieldsWereCleared(root);
   const actualJSON = root.toJSON();
 
   let actualJSX;
@@ -151,7 +150,7 @@ function jsonChildrenToJSXChildren(jsonChildren) {
       let allJSXChildrenAreStrings = true;
       let jsxChildrenString = '';
       for (let i = 0; i < jsonChildren.length; i++) {
-        const jsxChild = jsonChildrenToJSXChildren(jsonChildren[i]);
+        const jsxChild = jsonChildToJSXChild(jsonChildren[i]);
         jsxChildren.push(jsxChild);
         if (allJSXChildrenAreStrings) {
           if (typeof jsxChild === 'string') {

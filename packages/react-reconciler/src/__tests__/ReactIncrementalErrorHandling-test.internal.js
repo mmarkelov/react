@@ -28,11 +28,11 @@ describe('ReactIncrementalErrorHandling', () => {
 
   function div(...children) {
     children = children.map(c => (typeof c === 'string' ? {text: c} : c));
-    return {type: 'div', children, prop: undefined};
+    return {type: 'div', children, prop: undefined, hidden: false};
   }
 
   function span(prop) {
-    return {type: 'span', children: [], prop};
+    return {type: 'span', children: [], prop, hidden: false};
   }
 
   function normalizeCodeLocInfo(str) {
@@ -85,7 +85,7 @@ describe('ReactIncrementalErrorHandling', () => {
       </ErrorBoundary>,
     );
 
-    // Start rendering asynchronsouly
+    // Start rendering asynchronously
     ReactNoop.flushThrough([
       'ErrorBoundary (try)',
       'Indirection',
@@ -178,7 +178,7 @@ describe('ReactIncrementalErrorHandling', () => {
       </ErrorBoundary>,
     );
 
-    // Start rendering asynchronsouly
+    // Start rendering asynchronously
     ReactNoop.flushThrough([
       'ErrorBoundary (try)',
       'Indirection',
@@ -276,7 +276,7 @@ describe('ReactIncrementalErrorHandling', () => {
     // Schedule a low priority update to hide the child
     parent.current.setState({hideChild: true});
 
-    // Before the low priority update is flushed, synchronsouly trigger an
+    // Before the low priority update is flushed, synchronously trigger an
     // error in the child.
     ReactNoop.flushSync(() => {
       ReactNoop.render(<Parent ref={parent} childIsBroken={true} />);

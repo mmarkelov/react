@@ -18,7 +18,11 @@ export const {
   replayFailedUnitOfWorkWithInvokeGuardedCallback,
   warnAboutDeprecatedLifecycles,
   disableInputAttributeSyncing,
+  warnAboutShorthandPropertyCollision,
 } = require('ReactFeatureFlags');
+
+// The rest of the flags are static for better dead code elimination.
+export const enableHooks = true;
 
 // In www, we have experimental support for gathering data
 // from User Timing API calls in production. By default, we
@@ -30,6 +34,8 @@ export let enableUserTimingAPI = __DEV__;
 
 export const enableProfilerTimer = __PROFILE__;
 export const enableSchedulerTracing = __PROFILE__;
+
+export const enableStableConcurrentModeAPIs = false;
 
 let refCount = 0;
 export function addUserTimingListener() {
