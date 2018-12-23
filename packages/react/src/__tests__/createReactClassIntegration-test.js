@@ -442,7 +442,7 @@ describe('create-react-class-integration', () => {
   });
 
   it('warns if getDerivedStateFromProps is not static', () => {
-    const Foo = createReactClass({
+    const Component = createReactClass({
       getDerivedStateFromProps() {
         return {};
       },
@@ -451,7 +451,7 @@ describe('create-react-class-integration', () => {
       },
     });
     expect(() =>
-      ReactDOM.render(<Foo foo="foo" />, document.createElement('div')),
+      ReactDOM.render(<Component foo="foo" />, document.createElement('div')),
     ).toWarnDev(
       'Component: getDerivedStateFromProps() is defined as an instance method ' +
         'and will be ignored. Instead, declare it as a static method.',
@@ -460,7 +460,7 @@ describe('create-react-class-integration', () => {
   });
 
   it('warns if getDerivedStateFromError is not static', () => {
-    const Foo = createReactClass({
+    const Component = createReactClass({
       getDerivedStateFromError() {
         return {};
       },
@@ -469,7 +469,7 @@ describe('create-react-class-integration', () => {
       },
     });
     expect(() =>
-      ReactDOM.render(<Foo foo="foo" />, document.createElement('div')),
+      ReactDOM.render(<Component foo="foo" />, document.createElement('div')),
     ).toWarnDev(
       'Component: getDerivedStateFromError() is defined as an instance method ' +
         'and will be ignored. Instead, declare it as a static method.',
@@ -478,7 +478,7 @@ describe('create-react-class-integration', () => {
   });
 
   it('warns if getSnapshotBeforeUpdate is static', () => {
-    const Foo = createReactClass({
+    const Component = createReactClass({
       statics: {
         getSnapshotBeforeUpdate: function() {
           return null;
@@ -489,7 +489,7 @@ describe('create-react-class-integration', () => {
       },
     });
     expect(() =>
-      ReactDOM.render(<Foo foo="foo" />, document.createElement('div')),
+      ReactDOM.render(<Component foo="foo" />, document.createElement('div')),
     ).toWarnDev(
       'Component: getSnapshotBeforeUpdate() is defined as a static method ' +
         'and will be ignored. Instead, declare it as an instance method.',
