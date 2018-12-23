@@ -20,7 +20,9 @@ import type {ExpirationTime} from './ReactFiberExpirationTime';
 import type {CapturedValue, CapturedError} from './ReactCapturedValue';
 import type {SuspenseState} from './ReactFiberSuspenseComponent';
 import type {FunctionComponentUpdateQueue} from './ReactFiberHooks';
+import type {Thenable} from './ReactFiberScheduler';
 
+import {unstable_wrap as Schedule_tracing_wrap} from 'scheduler/tracing';
 import {
   enableHooks,
   enableSchedulerTracing,
@@ -88,6 +90,7 @@ import {
 import {
   captureCommitPhaseError,
   requestCurrentTime,
+  retryTimedOutBoundary,
 } from './ReactFiberScheduler';
 import {
   NoEffect as NoHookEffect,
@@ -105,6 +108,8 @@ let didWarnAboutUndefinedSnapshotBeforeUpdate: Set<mixed> | null = null;
 if (__DEV__) {
   didWarnAboutUndefinedSnapshotBeforeUpdate = new Set();
 }
+
+const PossiblyWeakSet = typeof WeakSet === 'function' ? WeakSet : Set;
 
 export function logError(boundary: Fiber, errorInfo: CapturedValue<mixed>) {
   const source = errorInfo.source;
@@ -336,9 +341,17 @@ function commitHookEffectList(
                 'useEffect function must return a cleanup function or ' +
                   'nothing.%s%s',
                 typeof destroy.then === 'function'
-                  ? ' Promises and useEffect(async () => ...) are not ' +
-                    'supported, but you can call an async function inside an ' +
-                    'effect.'
+                  ? '\n\nIt looks like you wrote useEffect(async () => ...) or returned a Promise. ' +
+                    'Instead, you may write an async function separately ' +
+                    'and then call it from inside the effect:\n\n' +
+                    'async function fetchComment(commentId) {\n' +
+                    '  // You can await here\n' +
+                    '}\n\n' +
+                    'useEffect(() => {\n' +
+                    '  fetchComment(commentId);\n' +
+                    '}, [commentId]);\n\n' +
+                    'In the future, React will provide a more idiomatic solution for data fetching ' +
+                    "that doesn't involve writing effects manually."
                   : '',
                 getStackByFiberInDevAndProd(finishedWork),
               );
@@ -1079,6 +1092,8 @@ function commitWork(current: Fiber | null, finishedWork: Fiber): void {
       case ForwardRef:
       case MemoComponent:
       case SimpleMemoComponent: {
+        // Note: We currently never use MountMutation, but useLayout uses
+        // UnmountMutation.
         commitHookEffectList(UnmountMutation, MountMutation, finishedWork);
         return;
       }
@@ -1093,6 +1108,8 @@ function commitWork(current: Fiber | null, finishedWork: Fiber): void {
     case ForwardRef:
     case MemoComponent:
     case SimpleMemoComponent: {
+      // Note: We currently never use MountMutation, but useLayout uses
+      // UnmountMutation.
       commitHookEffectList(UnmountMutation, MountMutation, finishedWork);
       return;
     }
@@ -1168,6 +1185,30 @@ function commitWork(current: Fiber | null, finishedWork: Fiber): void {
       if (primaryChildParent !== null) {
         hideOrUnhideAllChildren(primaryChildParent, newDidTimeout);
       }
+
+      // If this boundary just timed out, then it will have a set of thenables.
+      // For each thenable, attach a listener so that when it resolves, React
+      // attempts to re-render the boundary in the primary (pre-timeout) state.
+      const thenables: Set<Thenable> | null = (finishedWork.updateQueue: any);
+      if (thenables !== null) {
+        finishedWork.updateQueue = null;
+        let retryCache = finishedWork.stateNode;
+        if (retryCache === null) {
+          retryCache = finishedWork.stateNode = new PossiblyWeakSet();
+        }
+        thenables.forEach(thenable => {
+          // Memoize using the boundary fiber to prevent redundant listeners.
+          let retry = retryTimedOutBoundary.bind(null, finishedWork, thenable);
+          if (enableSchedulerTracing) {
+            retry = Schedule_tracing_wrap(retry);
+          }
+          if (!retryCache.has(thenable)) {
+            retryCache.add(thenable);
+            thenable.then(retry, retry);
+          }
+        });
+      }
+
       return;
     }
     case IncompleteClassComponent: {

@@ -34,6 +34,7 @@ export let enableUserTimingAPI = __DEV__;
 
 export const enableProfilerTimer = __PROFILE__;
 export const enableSchedulerTracing = __PROFILE__;
+export const enableSchedulerDebugging = true;
 
 export const enableStableConcurrentModeAPIs = false;
 
