@@ -7,7 +7,7 @@
 /* eslint-disable quotes */
 'use strict';
 
-let babel = require('babel-core');
+let babel = require('@babel/core');
 let devExpressionWithCodes = require('../replace-invariant-error-codes');
 
 const filename = 'replace-invariant-error-codes-test.js';
