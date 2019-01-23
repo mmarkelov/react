@@ -2,7 +2,7 @@
 
 const path = require('path');
 
-const babel = require('babel-core');
+const babel = require('@babel/core');
 const coffee = require('coffee-script');
 
 const tsPreprocessor = require('./typescript/preprocessor');
@@ -10,7 +10,8 @@ const createCacheKeyFunction = require('fbjs-scripts/jest/createCacheKeyFunction
 
 // Use require.resolve to be resilient to file moves, npm updates, etc
 const pathToBabel = path.join(
-  require.resolve('babel-core'),
+  require.resolve('@babel/core'),
+  '..',
   '..',
   'package.json'
 );

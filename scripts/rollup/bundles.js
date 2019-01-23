@@ -353,7 +353,7 @@ const bundles = [
     babel: opts =>
       Object.assign({}, opts, {
         plugins: opts.plugins.concat([
-          require.resolve('babel-plugin-transform-regenerator'),
+          require.resolve('@babel/plugin-transform-regenerator'),
         ]),
       }),
   },
