@@ -569,6 +569,45 @@ describe('ReactHooks', () => {
     ]);
   });
 
+  it('warns for bad useImperativeHandle first arg', () => {
+    const {useImperativeHandle} = React;
+    function App() {
+      useImperativeHandle({
+        focus() {},
+      });
+      return null;
+    }
+
+    expect(() => {
+      expect(() => {
+        ReactTestRenderer.create(<App />);
+      }).toThrow('create is not a function');
+    }).toWarnDev([
+      'Expected useImperativeHandle() first argument to either be a ' +
+        'ref callback or React.createRef() object. ' +
+        'Instead received: an object with keys {focus}.',
+      'Expected useImperativeHandle() second argument to be a function ' +
+        'that creates a handle. Instead received: undefined.',
+    ]);
+  });
+
+  it('warns for bad useImperativeHandle second arg', () => {
+    const {useImperativeHandle} = React;
+    const App = React.forwardRef((props, ref) => {
+      useImperativeHandle(ref, {
+        focus() {},
+      });
+      return null;
+    });
+
+    expect(() => {
+      ReactTestRenderer.create(<App />);
+    }).toWarnDev([
+      'Expected useImperativeHandle() second argument to be a function ' +
+        'that creates a handle. Instead received: object.',
+    ]);
+  });
+
   // https://github.com/facebook/react/issues/14022
   it('works with ReactDOMServer calls inside a component', () => {
     const {useState} = React;
@@ -661,223 +700,69 @@ describe('ReactHooks', () => {
     );
   });
 
-  it('double-invokes components with Hooks in Strict Mode', () => {
-    ReactFeatureFlags.debugRenderPhaseSideEffectsForStrictMode = true;
-
-    const {useState, StrictMode} = React;
-    let renderCount = 0;
-
-    function NoHooks() {
-      renderCount++;
-      return <div />;
+  it('warns on using differently ordered hooks on subsequent renders', () => {
+    const {useState, useReducer} = React;
+    function useCustomHook() {
+      return useState(0);
     }
-
-    function HasHooks() {
-      useState(0);
-      renderCount++;
-      return <div />;
+    function App(props) {
+      /* eslint-disable no-unused-vars */
+      if (props.flip) {
+        useCustomHook(0);
+        useReducer((s, a) => a, 0);
+      } else {
+        useReducer((s, a) => a, 0);
+        useCustomHook(0);
+      }
+      return null;
+      /* eslint-enable no-unused-vars */
     }
+    let root = ReactTestRenderer.create(<App flip={false} />);
+    expect(() => {
+      root.update(<App flip={true} />);
+    }).toWarnDev([
+      'Warning: React has detected a change in the order of Hooks called by App. ' +
+        'This will lead to bugs and errors if not fixed. For more information, ' +
+        'read the Rules of Hooks: https://fb.me/rules-of-hooks\n\n' +
+        '   Previous render    Next render\n' +
+        '   -------------------------------\n' +
+        '1. useReducer         useState\n' +
+        '   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^',
+    ]);
 
-    const FwdRef = React.forwardRef((props, ref) => {
-      renderCount++;
-      return <div />;
-    });
-
-    const FwdRefHasHooks = React.forwardRef((props, ref) => {
-      useState(0);
-      renderCount++;
-      return <div />;
-    });
-
-    const Memo = React.memo(props => {
-      renderCount++;
-      return <div />;
-    });
-
-    const MemoHasHooks = React.memo(props => {
-      useState(0);
-      renderCount++;
-      return <div />;
-    });
-
-    function Factory() {
-      return {
-        state: {},
-        render() {
-          renderCount++;
-          return <div />;
-        },
-      };
-    }
-
-    let renderer = ReactTestRenderer.create(null);
-
-    renderCount = 0;
-    renderer.update(<NoHooks />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(<NoHooks />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <NoHooks />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <NoHooks />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(1);
-
-    renderCount = 0;
-    renderer.update(<FwdRef />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(<FwdRef />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <FwdRef />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <FwdRef />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(1);
-
-    renderCount = 0;
-    renderer.update(<Memo arg={1} />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(<Memo arg={2} />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <Memo arg={1} />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <Memo arg={2} />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(1);
-
-    renderCount = 0;
-    renderer.update(<Factory />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(<Factory />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <Factory />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(__DEV__ ? 2 : 1); // Treated like a class
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <Factory />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(__DEV__ ? 2 : 1); // Treated like a class
-
-    renderCount = 0;
-    renderer.update(<HasHooks />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(<HasHooks />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <HasHooks />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(__DEV__ ? 2 : 1); // Has Hooks
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <HasHooks />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(__DEV__ ? 2 : 1); // Has Hooks
-
-    renderCount = 0;
-    renderer.update(<FwdRefHasHooks />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(<FwdRefHasHooks />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <FwdRefHasHooks />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(__DEV__ ? 2 : 1); // Has Hooks
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <FwdRefHasHooks />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(__DEV__ ? 2 : 1); // Has Hooks
-
-    renderCount = 0;
-    renderer.update(<MemoHasHooks arg={1} />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(<MemoHasHooks arg={2} />);
-    expect(renderCount).toBe(1);
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <MemoHasHooks arg={1} />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(__DEV__ ? 2 : 1); // Has Hooks
-    renderCount = 0;
-    renderer.update(
-      <StrictMode>
-        <MemoHasHooks arg={2} />
-      </StrictMode>,
-    );
-    expect(renderCount).toBe(__DEV__ ? 2 : 1); // Has Hooks
+    // further warnings for this component are silenced
+    root.update(<App flip={false} />);
   });
 
-  it('double-invokes useMemo in DEV StrictMode despite []', () => {
-    ReactFeatureFlags.debugRenderPhaseSideEffectsForStrictMode = true;
-    const {useMemo, StrictMode} = React;
-
-    let useMemoCount = 0;
-    function BadUseMemo() {
-      useMemo(() => {
-        useMemoCount++;
-      }, []);
-      return <div />;
+  it('detects a bad hook order even if the component throws', () => {
+    const {useState, useReducer} = React;
+    function useCustomHook() {
+      useState(0);
     }
-
-    useMemoCount = 0;
-    ReactTestRenderer.create(
-      <StrictMode>
-        <BadUseMemo />
-      </StrictMode>,
-    );
-    expect(useMemoCount).toBe(__DEV__ ? 2 : 1); // Has Hooks
+    function App(props) {
+      /* eslint-disable no-unused-vars */
+      if (props.flip) {
+        useCustomHook();
+        useReducer((s, a) => a, 0);
+        throw new Error('custom error');
+      } else {
+        useReducer((s, a) => a, 0);
+        useCustomHook();
+      }
+      return null;
+      /* eslint-enable no-unused-vars */
+    }
+    let root = ReactTestRenderer.create(<App flip={false} />);
+    expect(() => {
+      expect(() => root.update(<App flip={true} />)).toThrow('custom error');
+    }).toWarnDev([
+      'Warning: React has detected a change in the order of Hooks called by App. ' +
+        'This will lead to bugs and errors if not fixed. For more information, ' +
+        'read the Rules of Hooks: https://fb.me/rules-of-hooks\n\n' +
+        '   Previous render    Next render\n' +
+        '   -------------------------------\n' +
+        '1. useReducer         useState\n' +
+        '   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^',
+    ]);
   });
 });
